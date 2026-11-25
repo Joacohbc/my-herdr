@@ -281,6 +281,7 @@ export default class SystemMonitor extends View {
     const sysCpuColor = barColor(this.cpuPct, t);
     const sysRamColor = barColor(this.memPct, t);
     const topApps = this.sortedApps().slice(0, 8);
+    const sysTip = `System · CPU ${formatPct(this.cpuPct)} (${this.cores} cores) · RAM ${this.memTotalKb ? `${formatMem(this.memUsedKb)} / ${formatMem(this.memTotalKb)} (${Math.round(this.memPct)}%)` : "…"} · Orden: ${this.sortBy.toUpperCase()} (clic para cambiar)`;
 
     return v_flex()
       .size_full()
@@ -301,6 +302,7 @@ export default class SystemMonitor extends View {
           .border_color(t.border)
           .cursor_pointer()
           .hover(s => s.bg(t.hover))
+          .tooltip(sysTip)
           .on_click((_e, cx) => {
             this.sortBy = this.sortBy === "ram" ? "cpu" : "ram";
             cx.notify();
@@ -323,6 +325,8 @@ export default class SystemMonitor extends View {
               const primaryPct = this.sortBy === "cpu" ? app.cpuNorm : app.ramPct;
               const alertPct = Math.max(app.ramPct, app.cpuNorm);
               const style = appAlertStyle(alertPct, t);
+              const procLabel = app.count === 1 ? "1 proceso" : `${app.count} procesos`;
+              const tip = `${app.name} · RAM: ${formatMem(app.rss)} (${formatPct(app.ramPct)}) · CPU: ${formatPct(app.cpuNorm)} · ${procLabel}`;
               return v_flex()
                 .id(`sysmon-c-${app.name}`)
                 .w(32)
@@ -334,6 +338,7 @@ export default class SystemMonitor extends View {
                 .bg(style.bg)
                 .border_1()
                 .border_color(style.border)
+                .tooltip(tip)
                 .child(renderAppIcon(app, t))
                 .child(div().text_size(8.5).font_semibold().text_color(style.text).child(`${Math.round(primaryPct)}%`));
             }),
@@ -455,8 +460,10 @@ export default class SystemMonitor extends View {
                   err.child(div().px(6).py(4).text_size(11).text_color(t.ansi1).child(this.error)),
                 )
                 .children(
-                  this.sortedApps().map(app =>
-                    h_flex()
+                  this.sortedApps().map(app => {
+                    const procLabel = app.count === 1 ? "1 proceso" : `${app.count} procesos`;
+                    const tip = `${app.name} · RAM: ${formatMem(app.rss)} (${formatPct(app.ramPct)}) · CPU: ${formatPct(app.cpuNorm)} · ${procLabel}`;
+                    return h_flex()
                       .id(`sysmon-app-${app.name}`)
                       .h(25)
                       .flex_none()
@@ -465,6 +472,7 @@ export default class SystemMonitor extends View {
                       .items_center()
                       .rounded(5)
                       .hover(s => s.bg(t.hover))
+                      .tooltip(tip)
                       .child(renderAppIcon(app, t))
                       .child(
                         div()
@@ -493,8 +501,8 @@ export default class SystemMonitor extends View {
                           .font_medium()
                           .text_color(this.sortBy === "ram" ? t.foreground : t.muted)
                           .child(formatMem(app.rss)),
-                      ),
-                  ),
+                      );
+                  }),
                 ),
             ),
           ),
