@@ -69,8 +69,10 @@ Para el inventario completo de archivos, mods, repositorios de iconos y arquitec
   - `Base + [` / `]`: mover tab izquierda/derecha
   - `Ctrl + Space` (o `Base + r`): abrir el HUD modal `tiling-mode` (navegación, swap, modo Resize con flechas `r`, splits, cerrar/reabrir).
 
-### Panel de cambios e historial Git (`changes-history`)
-- Debe mantener intactas las funciones nativas de `Changes` (archivos modificados, diff virtualizado y commit) y sumar la pestaña **`History`** en la barra superior para ver el historial de commits (`git log`), abrir cualquier commit, listar sus archivos modificados y ver el diff virtualizado de cada archivo (compatible con repos locales y remotos SSH).
+### Panel de cambios, Stash e historial Git estilo VS Code (`changes-history`)
+- Diseño estilo **VS Code Source Control**:
+  - Caja de mensaje + botón ancho `✓ Commit` en la parte superior (hace commit solo de staged si existen, o stagea todo y commitea si no hay staged) + barra de acciones rápidas (`S+` Stash, `↓` Pull, `↑` Push, `↻` Refresh).
+  - Secciones colapsables: **Staged Changes** (con `−` Unstage / Unstage All), **Changes** (con iconos Material Icons 16×16, abrir en `file-viewer` `↗`, `↺` Discard y `+` Stage / Stage All), **Stashes** (`+` crear stash con `-u`, `Apply`, `Pop`, `×` Drop) y **Graph** (historial de commits `git log`, clic para abrir archivos modificados y diff virtualizado con `git show`).
 
 ### Monitor de sistema en el lateral izquierdo (`system-monitor`)
 - Mostrar **CPU total** y **RAM total** (uso / total / % con barra de color dinámico) + **procesos agrupados por aplicación** ordenables por `RAM` o `CPU`.

@@ -114,11 +114,12 @@ Modo Tiling Manager & Resize HUD activado con `Ctrl+Space` (o `Ctrl+Alt+R`), má
 ---
 
 ### 4.6 `changes-history` (`~/.config/herdr-app/mods/changes-history/`)
-Clon extendido del panel `changes` con pestaña **`History`** para navegar commits y diffs históricos (local y SSH).
+Panel de Source Control estilo VS Code (clon extendido de `changes`, compatible local y SSH).
 
 | Archivo | Responsabilidad |
 |---|---|
-| `main.js` | Pestaña `Changes` (uncommitted + diff virtualizado + commit) y pestaña `History` (`git log`, refs/hash/autor/fecha, paginación `+50`, detalle de archivos del commit con `diff-tree --root` y diff virtualizado con `git show`) |
+| `main.js` | Caja de `Commit` arriba + barra rápida (`S+`, `↓`, `↑`, `↻`) + secciones colapsables: `Staged Changes`, `Changes` (stage/unstage/discard/open in viewer + diff inline), `Stashes` (push/apply/pop/drop) y `Graph` (historial `git log` + vista de archivos y diff virtualizado por commit) |
+| `material-icons.js` | Copia local del mapa de Material Icons para renderizar iconos 16×16 en `Changes`, `Staged Changes` y detalle de commits |
 | `changes.svg`, `mod.json` | Icono y manifiesto del mod |
 
 ---

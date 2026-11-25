@@ -1,7 +1,8 @@
-// Git Changes + Commit History panel (cloned & extended from Herdr's native changes mod).
-import { View, div } from "gpui-kit";
+// VS Code-style Source Control panel: Commit, Staged/Unstaged Changes, Stashes, and Graph/History.
+import { View, div, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar, v_virtual_list } from "gpui-base";
-import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, window, checking } from "herdr";
+import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, window, checking, run, shared, setShared } from "herdr";
+import { fileIcon } from "./material-icons.js";
 
 const scans = globalThis[Symbol.for("herdr.repoStatus.v2")] ??= new Map();
 
@@ -85,21 +86,31 @@ function diffRows(lines) {
 }
 
 function statusColor(status, t) {
-  if (status === "A") return t.ansi2;
-  if (status === "D" || status === "U") return t.ansi1;
+  if (status === "A" || status === "U") return t.ansi2;
+  if (status === "D") return t.ansi1;
   if (status === "R") return t.ansi4;
   return t.blocked;
 }
 
 export default class ChangesHistory extends View {
   init(_props, cx) {
-    this.tab = "changes";
-    this.files = [];
+    this.branch = "";
+    this.staged = [];
+    this.unstaged = [];
+    this.stashes = [];
+    this.open = null; // { path, staged }
     this.rows = [];
     this.longest = 0;
     this.gutterChars = 4;
     this.message = "";
     this.handle = cx.focus_handle();
+
+    // Collapsible VS Code sections
+    this.secStaged = true;
+    this.secChanges = true;
+    this.secStashes = false;
+    this.secGraph = false;
+    this.hoveredRow = null;
 
     // Commit history state
     this.commits = [];
@@ -115,7 +126,7 @@ export default class ChangesHistory extends View {
     this.commitGutterChars = 4;
     this.commitDetailLoading = false;
 
-    this.input = InputState.new({ placeholder: "Commit message" });
+    this.input = InputState.new({ placeholder: "Message (Enter to commit)" });
     this.input.on("change", (_e, cx) => {
       const hadMessage = Boolean(this.message.trim());
       this.message = this.input.value();
@@ -190,14 +201,16 @@ export default class ChangesHistory extends View {
       this.context?.watch?.pending?.cancel();
       this.context = { key: next, on, dirtyAt: 0 };
       this.root = null;
-      this.files = [];
+      this.branch = "";
+      this.staged = [];
+      this.unstaged = [];
+      this.stashes = [];
       this.open = null;
       this.setLines([]);
       this.message = "";
       this.input.set_value("");
       this.error = null;
       this.note = null;
-      this.closed = false;
       this.limited = false;
       this.loading = false;
       this.resetHistory();
@@ -221,22 +234,33 @@ export default class ChangesHistory extends View {
     context.catchUp = false;
     context.pollAt = context.watchAt = now + 10000;
     this.loading = true;
+
     cx.spawn(async (cx) => {
       try {
         const top = await exec("git", ["rev-parse", "--show-toplevel"], { cwd, on });
         if (!this.current(context)) return;
         if (top.code !== 0) {
           this.root = null;
-          this.files = [];
+          this.branch = "";
+          this.staged = [];
+          this.unstaged = [];
+          this.stashes = [];
           this.setLines([]);
           this.open = null;
           this.error = "Not a git repository";
           return;
         }
-        const root = top.stdout.trim(), git = (args) => exec("git", [...READ, ...args], { cwd: root, on });
+        const root = top.stdout.trim();
+        const git = (args) => exec("git", [...READ, ...args], { cwd: root, on });
         this.watch(root, context, cx);
-        const scan = await repoStatus(root, on, request, cx, () => this.context === context);
+
+        const [scan, brRes, stashRes] = await Promise.all([
+          repoStatus(root, on, request, cx, () => this.context === context),
+          git(["branch", "--show-current"]),
+          git(["stash", "list", "--pretty=format:%gd%x1f%gs%x1f%cr"]),
+        ]);
         if (!scan || !this.current(context)) return;
+
         const { status, started, pollAt, watchAt } = scan;
         context.lastStatus = started;
         context.pollAt = pollAt;
@@ -245,44 +269,57 @@ export default class ChangesHistory extends View {
         if (scan.error) throw scan.error;
         if (status.code !== 0) throw new Error(status.stderr);
         if (request.urgent && request.after > started) context.catchUp = true;
-        const entries = status.stdout.split("\0").filter(Boolean), shown = entries.slice(0, 1000);
-        const tracked = shown.some(entry => !entry.startsWith("??"));
-        const hasHead = tracked && (await git(["rev-parse", "--verify", "HEAD"])).code === 0;
-        const stats = {};
-        const results = !tracked ? [] : hasHead
-          ? [await git(["diff", "HEAD", "--numstat", "-z", "--no-renames"])]
-          : [await git(["diff", "--cached", "--numstat", "-z", "--no-renames"]), await git(["diff", "--numstat", "-z", "--no-renames"])];
-        for (const result of results) {
-          if (result.code !== 0) throw new Error(result.stderr);
-          for (const entry of result.stdout.split("\0")) {
-            const [a, d, ...parts] = entry.split("\t");
-            if (!parts.length) continue;
-            const path = parts.join("\t"), old = stats[path] ?? { add: 0, del: 0 };
-            stats[path] = { add: old.add + (Number(a) || 0), del: old.del + (Number(d) || 0), binary: a === "-" };
+
+        const entries = status.stdout.split("\0").filter(Boolean);
+        const shown = entries.slice(0, 1000);
+        const staged = [];
+        const unstaged = [];
+
+        for (const entry of shown) {
+          const x = entry[0], y = entry[1], path = entry.slice(3);
+          if (!path) continue;
+          if (x === "?" && y === "?") {
+            unstaged.push({ path, status: "U", untracked: true, staged: false });
+            continue;
+          }
+          if (x !== " " && x !== "?") {
+            staged.push({ path, status: x, untracked: false, staged: true });
+          }
+          if (y !== " " && y !== "?") {
+            unstaged.push({ path, status: y, untracked: false, staged: false });
           }
         }
-        const files = [];
-        for (const entry of shown) {
-          const xy = entry.slice(0, 2), path = entry.slice(3), fresh = xy === "??";
-          const conflict = xy.includes("U") || xy === "AA" || xy === "DD";
-          const s = conflict ? "U" : xy.includes("D") ? "D" : fresh || xy.includes("A") ? "A" : "M";
-          const stat = stats[path] ?? { add: 0, del: 0 };
-          files.push({ path, status: s, fresh, ...stat });
+
+        const stashes = [];
+        if (stashRes.code === 0) {
+          for (const line of (stashRes.stdout || "").split("\n")) {
+            if (!line) continue;
+            const [ref, msg, rel] = line.split("\x1f");
+            if (ref) stashes.push({ ref, message: msg || ref, relDate: rel || "" });
+          }
         }
+
         if (!this.current(context)) return;
         this.root = root;
         this.on = on;
-        this.hasHead = hasHead;
-        this.files = files;
+        this.branch = (brRes.stdout || "").trim() || "HEAD";
+        this.staged = staged;
+        this.unstaged = unstaged;
+        this.stashes = stashes;
         this.limited = entries.length > 1000;
         this.error = null;
-        if (this.open && !files.some((f) => f.path === this.open)) { this.open = null; this.setLines([]); }
-        if (!this.open && !this.closed && files.length) this.open = files[0].path;
+
         if (this.open) {
-          try { await this.load(this.open, context); }
-          catch { if (this.current(context)) this.setLines(["Cannot preview this diff (too large or unreadable)"]); }
+          const list = this.open.staged ? staged : unstaged;
+          if (!list.some(f => f.path === this.open.path)) {
+            this.open = null;
+            this.setLines([]);
+          } else {
+            await this.loadDiff(this.open, context).catch(() => {});
+          }
         }
-        if (this.tab === "history" && (force || this.historyLoadedFor !== root)) {
+
+        if (this.secGraph && (force || this.historyLoadedFor !== root)) {
           this.loadHistory(cx, true);
         }
       } catch (e) { if (this.current(context)) this.error = String(e); }
@@ -291,6 +328,159 @@ export default class ChangesHistory extends View {
         cx.notify();
       }
     });
+  }
+
+  runGitAction(args, cx, successNote = null) {
+    if (!this.root || this.busy) return;
+    const root = this.root, on = this.on, context = this.context;
+    this.busy = true;
+    this.note = null;
+    cx.spawn(async cx => {
+      try {
+        const r = await exec("git", args, { cwd: root, on, timeout: 15000 });
+        if (!this.current(context)) return;
+        if (r.code !== 0) {
+          this.note = (r.stderr || r.stdout || "Git command failed").trim();
+        } else {
+          this.note = successNote;
+          this.historyLoadedFor = null;
+        }
+      } catch (e) {
+        if (this.current(context)) this.note = String(e.message || e);
+      } finally {
+        if (this.current(context)) {
+          this.busy = false;
+          this.refresh(cx, true);
+          cx.notify();
+        }
+      }
+    });
+    cx.notify();
+  }
+
+  stageFile(path, cx) { this.runGitAction(["add", "--", path], cx); }
+  unstageFile(path, cx) { this.runGitAction(["reset", "HEAD", "--", path], cx); }
+  stageAll(cx) { this.runGitAction(["add", "-A"], cx); }
+  unstageAll(cx) { this.runGitAction(["reset", "HEAD"], cx); }
+
+  discardFile(file, cx) {
+    if (file.untracked) {
+      this.runGitAction(["clean", "-fd", "--", file.path], cx);
+    } else {
+      this.runGitAction(["checkout", "--", file.path], cx);
+    }
+  }
+
+  stashPush(cx) {
+    const msg = this.message.trim();
+    const args = msg ? ["stash", "push", "-u", "-m", msg] : ["stash", "push", "-u"];
+    if (msg) {
+      this.message = "";
+      this.input.set_value("");
+    }
+    this.secStashes = true;
+    this.runGitAction(args, cx);
+  }
+
+  stashApply(ref, cx) { this.runGitAction(["stash", "apply", ref], cx); }
+  stashPop(ref, cx) { this.runGitAction(["stash", "pop", ref], cx); }
+  stashDrop(ref, cx) { this.runGitAction(["stash", "drop", ref], cx); }
+
+  openInViewer(path, event) {
+    if (!path || !this.root) return;
+    const f = focused();
+    const tabId = f?.tab ?? null;
+    const openInNewTab = Boolean(event?.modifiers?.control || event?.modifiers?.platform);
+    const fileName = path.split(/[\\/]/).pop() || path;
+    const payload = { file: path, root: this.root, on: this.on ?? null, tab: tabId, line: null, col: null, matchLen: null };
+
+    if (openInNewTab) {
+      const res = run("tab.new", { name: fileName, mod: "file-viewer", props: { ...payload, tab: null, solo: true } });
+      if (res?.pane) run("pane.rename", { pane: res.pane, name: fileName });
+      return;
+    }
+
+    const existing = tabId ? panes().find(p => p.tab === tabId && p.mod === "file-viewer") : null;
+    if (existing) {
+      const prevSeq = shared("file-viewer.open")?.seq ?? 0;
+      setShared("file-viewer.open", { ...payload, pane: existing.pane, seq: prevSeq + 1 });
+      run("pane.focus", { pane: existing.pane });
+      run("pane.rename", { pane: existing.pane, name: fileName });
+      return;
+    }
+    const res = run("pane.split", { direction: "right", mod: "file-viewer", props: payload });
+    if (res?.pane) run("pane.rename", { pane: res.pane, name: fileName });
+  }
+
+  async loadDiff(target, context) {
+    const root = this.root, on = this.on;
+    const list = target.staged ? this.staged : this.unstaged;
+    const file = list.find(f => f.path === target.path);
+    if (!file) return;
+
+    let lines;
+    if (file.untracked) {
+      const text = await readTextFile(`${root}/${file.path}`, { on }).catch(() => null);
+      if (text === null) lines = ["Cannot preview this file"];
+      else if (text.includes("\0")) lines = ["Binary file · no text diff"];
+      else {
+        const count = countLines(text);
+        lines = [`@@ -0,0 +1,${count} @@`, ...text.slice(0, 400000).replace(/\n$/, "").split("\n").slice(0, 1500).map(l => `+${l}`)];
+      }
+    } else {
+      const args = target.staged
+        ? [...READ, "diff", "--cached", "--no-ext-diff", "--no-textconv", "--no-color", "--", file.path]
+        : [...READ, "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--", file.path];
+      const r = await exec("git", args, { cwd: root, on });
+      if (r.code !== 0) throw new Error(r.stderr);
+      const all = (r.stdout || "").replace(/\n$/, "").split("\n");
+      const first = all.findIndex(l => l.startsWith("@@"));
+      lines = first < 0 ? ["Binary file or empty diff"] : all.slice(first);
+    }
+
+    if (this.current(context) && this.open?.path === target.path && this.open?.staged === target.staged) {
+      this.setLines(lines.slice(0, 1500).map(l => l.length > 4000 ? l.slice(0, 4000) + "…" : l));
+    }
+  }
+
+  pickDiff(file, cx) {
+    const same = this.open && this.open.path === file.path && this.open.staged === file.staged;
+    this.open = same ? null : { path: file.path, staged: file.staged };
+    this.setLines([]);
+    const context = this.context;
+    if (this.open) {
+      const target = this.open;
+      cx.spawn(async cx => {
+        try { await this.loadDiff(target, context); }
+        catch (e) { if (this.current(context)) this.note = `Diff error: ${e}`; }
+        cx.notify();
+      });
+    }
+    cx.notify();
+  }
+
+  commit(cx) {
+    if (!this.message.trim() || !this.root || this.busy || this.loading || this.context?.key !== key()) return;
+    const root = this.root, on = this.on, context = this.context, message = this.message.trim();
+    const hasStaged = this.staged.length > 0;
+    this.busy = true;
+    this.note = null;
+    cx.spawn(async (cx) => {
+      try {
+        const cmds = hasStaged ? [["commit", "-m", message]] : [["add", "-A"], ["commit", "-m", message]];
+        for (const args of cmds) {
+          const r = await exec("git", args, { cwd: root, on });
+          if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
+        }
+        if (this.current(context)) {
+          this.message = "";
+          this.input.set_value("");
+          this.historyLoadedFor = null;
+        }
+      } catch (e) { if (this.current(context)) this.note = `Commit failed: ${e}`; }
+      finally { this.busy = false; this.refresh(cx, true); cx.notify(); }
+    });
+    cx.notify();
   }
 
   loadHistory(cx, reset = false) {
@@ -305,18 +495,14 @@ export default class ChangesHistory extends View {
       try {
         const r = await exec(
           "git",
-          [...READ, "log", `-n`, String(limit), "--pretty=format:%H%x1f%h%x1f%an%x1f%ar%x1f%D%x1f%s"],
+          [...READ, "log", "-n", String(limit), "--pretty=format:%H%x1f%h%x1f%an%x1f%ar%x1f%D%x1f%s"],
           { cwd: root, on, timeout: 8000 },
         );
         if (!this.current(context)) return;
         if (r.code !== 0) {
           const err = (r.stderr || "").trim();
-          if (err.includes("does not have any commits")) {
-            this.commits = [];
-            this.historyError = null;
-          } else {
-            this.historyError = err || "Cannot read git log";
-          }
+          if (err.includes("does not have any commits")) { this.commits = []; this.historyError = null; }
+          else this.historyError = err || "Cannot read git log";
           return;
         }
         const parsed = [];
@@ -339,10 +525,7 @@ export default class ChangesHistory extends View {
       } catch (e) {
         if (this.current(context)) this.historyError = String(e.message || e);
       } finally {
-        if (this.current(context)) {
-          this.historyLoading = false;
-          cx.notify();
-        }
+        if (this.current(context)) { this.historyLoading = false; cx.notify(); }
       }
     });
     cx.notify();
@@ -369,8 +552,7 @@ export default class ChangesHistory extends View {
           for (const entry of (numRes.stdout || "").split("\0")) {
             const [a, d, ...parts] = entry.split("\t");
             if (!parts.length) continue;
-            const path = parts.join("\t");
-            stats[path] = { add: Number(a) || 0, del: Number(d) || 0, binary: a === "-" };
+            stats[parts.join("\t")] = { add: Number(a) || 0, del: Number(d) || 0 };
           }
         }
 
@@ -382,13 +564,9 @@ export default class ChangesHistory extends View {
             if (!rawStatus) continue;
             const status = rawStatus[0];
             let path = tokens[i + 1];
-            if ((status === "R" || status === "C") && i + 2 < tokens.length) {
-              path = tokens[i + 2];
-              i += 1;
-            }
+            if ((status === "R" || status === "C") && i + 2 < tokens.length) { path = tokens[i + 2]; i += 1; }
             if (!path) continue;
-            const st = stats[path] ?? { add: 0, del: 0, binary: false };
-            files.push({ path, status, ...st });
+            files.push({ path, status, ...(stats[path] ?? { add: 0, del: 0 }) });
             if (files.length >= 400) break;
           }
         }
@@ -399,14 +577,9 @@ export default class ChangesHistory extends View {
           await this.loadCommitFileDiff(hash, files[0].path, context);
         }
       } catch (e) {
-        if (this.current(context) && this.selectedCommit?.hash === hash) {
-          this.setCommitLines([`Cannot load commit details: ${e}`]);
-        }
+        if (this.current(context)) this.setCommitLines([`Cannot load commit: ${e}`]);
       } finally {
-        if (this.current(context) && this.selectedCommit?.hash === hash) {
-          this.commitDetailLoading = false;
-          cx.notify();
-        }
+        if (this.current(context)) { this.commitDetailLoading = false; cx.notify(); }
       }
     });
     cx.notify();
@@ -414,20 +587,13 @@ export default class ChangesHistory extends View {
 
   async loadCommitFileDiff(hash, path, context) {
     const root = this.root, on = this.on;
-    const r = await exec(
-      "git",
-      [...READ, "show", "--format=", "--no-ext-diff", "--no-textconv", "--no-color", hash, "--", path],
-      { cwd: root, on, timeout: 8000 },
-    );
+    const r = await exec("git", [...READ, "show", "--format=", "--no-ext-diff", "--no-textconv", "--no-color", hash, "--", path], { cwd: root, on, timeout: 8000 });
     if (!this.current(context) || this.selectedCommit?.hash !== hash || this.commitOpenFile !== path) return;
-    if (r.code !== 0) {
-      this.setCommitLines([r.stderr || "Cannot load diff"]);
-      return;
-    }
+    if (r.code !== 0) { this.setCommitLines([r.stderr || "Cannot load diff"]); return; }
     const all = (r.stdout || "").replace(/\n$/, "").split("\n");
     const first = all.findIndex(l => l.startsWith("@@"));
     const lines = first < 0 ? ["Binary file or empty diff"] : all.slice(first);
-    this.setCommitLines(lines.slice(0, 1500).map(line => line.length > 4000 ? line.slice(0, 4000) + "… (line truncated)" : line));
+    this.setCommitLines(lines.slice(0, 1500).map(l => l.length > 4000 ? l.slice(0, 4000) + "…" : l));
   }
 
   pickCommitFile(path, cx) {
@@ -437,319 +603,223 @@ export default class ChangesHistory extends View {
     const context = this.context, hash = this.selectedCommit.hash;
     cx.spawn(async cx => {
       try { await this.loadCommitFileDiff(hash, path, context); }
-      catch (e) { if (this.current(context)) this.setCommitLines([`Cannot load diff: ${e}`]); }
+      catch (e) { if (this.current(context)) this.setCommitLines([`Diff error: ${e}`]); }
       cx.notify();
     });
     cx.notify();
-  }
-
-  async load(path, context) {
-    const file = this.files.find((f) => f.path === path), root = this.root, on = this.on;
-    if (!file) return;
-    let lines;
-    if (file.fresh || (!this.hasHead && file.status === "A")) {
-      const text = await readTextFile(`${root}/${path}`, { on }).catch(() => null);
-      if (text === null) lines = ["Cannot preview this file (binary, too large, or unreadable)"];
-      else if (text.includes("\0")) lines = ["Binary file · no text diff"];
-      else {
-        file.add = countLines(text);
-        lines = [`@@ -0,0 +1,${file.add} @@`, ...text.slice(0, 400000).replace(/\n$/, "").split("\n").slice(0, 1500).map(l => `+${l}`)];
-      }
-    } else {
-      const r = await exec("git", [...READ, "diff", ...(this.hasHead ? ["HEAD"] : []), "--no-ext-diff", "--no-textconv", "--no-color", "--", path], { cwd: root, on });
-      if (r.code !== 0) throw new Error(r.stderr);
-      const all = r.stdout.replace(/\n$/, "").split("\n"), first = all.findIndex((l) => l.startsWith("@@"));
-      lines = first < 0 ? [file.binary ? "Binary file changed" : "No text diff available"] : all.slice(first);
-    }
-    if (this.current(context) && this.open === path) this.setLines(lines.slice(0, 1500).map(line => line.length > 4000 ? line.slice(0, 4000) + "… (line truncated)" : line));
   }
 
   setLines(lines) {
     this.rows = diffRows(lines);
-    this.longest = Math.max(0, ...this.rows.map(row => displayColumns(row.text)));
-    this.gutterChars = Math.max(4, String(Math.max(0, ...this.rows.map(row => row.number ?? 0))).length);
+    this.longest = Math.max(0, ...this.rows.map(r => displayColumns(r.text)));
+    this.gutterChars = Math.max(4, String(Math.max(0, ...this.rows.map(r => r.number ?? 0))).length);
   }
 
   setCommitLines(lines) {
     this.commitRows = diffRows(lines);
-    this.commitLongest = Math.max(0, ...this.commitRows.map(row => displayColumns(row.text)));
-    this.commitGutterChars = Math.max(4, String(Math.max(0, ...this.commitRows.map(row => row.number ?? 0))).length);
-  }
-
-  pick(path, cx) {
-    this.open = this.open === path ? null : path;
-    this.setLines([]);
-    this.note = null;
-    this.closed = !this.open;
-    const context = this.context;
-    if (this.open) cx.spawn(async (cx) => {
-      try { await this.load(path, context); }
-      catch (e) { if (this.current(context) && this.open === path) this.note = `Cannot preview this diff (too large or unreadable): ${e}`; }
-      cx.notify();
-    });
-    cx.notify();
-  }
-
-  commit(cx) {
-    if (!this.message.trim() || !this.root || this.busy || this.loading || this.context?.key !== key()) return;
-    const root = this.root, on = this.on, context = this.context, message = this.message.trim();
-    this.busy = true;
-    this.note = null;
-    cx.spawn(async (cx) => {
-      try {
-        for (const args of [["add", "-A"], ["commit", "-m", message]]) {
-          const r = await exec("git", args, { cwd: root, on });
-          if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
-        }
-        if (this.current(context)) {
-          this.message = "";
-          this.input.set_value("");
-          this.historyLoadedFor = null;
-        }
-      } catch (e) { if (this.current(context)) this.note = `Commit failed: ${e}`; }
-      finally { this.busy = false; this.refresh(cx, true); cx.notify(); }
-    });
-    cx.notify();
+    this.commitLongest = Math.max(0, ...this.commitRows.map(r => displayColumns(r.text)));
+    this.commitGutterChars = Math.max(4, String(Math.max(0, ...this.commitRows.map(r => r.number ?? 0))).length);
   }
 
   gutter(chars, size) { return Math.ceil(chars * charWidth(size)) + 2; }
 
   diffRow({ kind, number, text }, t, size, gutterChars) {
     const height = rowHeight(size);
-    if (kind === "@") return div().w_full().px(12).h(height).flex_none().truncate().bg(t.raised).text_color(t.dim).child(text);
-    return h_flex().w_full().h(height).flex_none().gap(10).when(kind === "+", (e) => e.bg(t.ansi2 + "18")).when(kind === "-", (e) => e.bg(t.ansi1 + "18"))
+    if (kind === "@") return div().w_full().px(10).h(height).flex_none().truncate().bg(t.raised).text_color(t.dim).child(text);
+    return h_flex().w_full().h(height).flex_none().gap(8).when(kind === "+", (e) => e.bg(t.ansi2 + "18")).when(kind === "-", (e) => e.bg(t.ansi1 + "18"))
       .child(div().w(this.gutter(gutterChars, size)).flex_none().text_right().text_color(t.dim).child(number === undefined ? "" : String(number)))
       .child(div().flex_1().min_w(0).truncate().child(text));
   }
 
-  renderHistory(t, size) {
-    if (!this.root) {
-      return div().p(12).text_size(12).text_color(t.dim).child(this.error || "Not a git repository");
-    }
+  actionBtn(t, id, label, tip, onClick) {
+    return div()
+      .id(id)
+      .px(5)
+      .py(2)
+      .rounded(5)
+      .text_size(11.5)
+      .text_color(t.dim)
+      .cursor_pointer()
+      .hover(s => s.bg(t.hover).text_color(t.foreground))
+      .tooltip(tip)
+      .on_click((e, cx) => {
+        cx.stop_propagation();
+        onClick(e, cx);
+      })
+      .child(label);
+  }
 
-    if (this.selectedCommit) {
-      const c = this.selectedCommit;
-      return v_flex()
-        .flex_1()
-        .min_h(0)
-        .child(
-          v_flex()
-            .flex_none()
-            .px(10)
-            .py(8)
-            .gap(4)
-            .border_b(1)
-            .border_color(t.border)
-            .child(
-              h_flex()
-                .gap(6)
-                .items_center()
-                .child(
-                  div()
-                    .id("hist-back")
-                    .px(6)
-                    .py(2)
-                    .rounded(5)
-                    .text_size(12)
-                    .text_color(t.muted)
-                    .cursor_pointer()
-                    .hover(s => s.bg(t.hover).text_color(t.foreground))
-                    .on_click((_e, cx) => {
-                      this.selectedCommit = null;
-                      this.commitFiles = [];
-                      this.commitOpenFile = null;
-                      this.setCommitLines([]);
-                      cx.notify();
-                    })
-                    .child("←"),
-                )
-                .child(
-                  div()
-                    .px(5)
-                    .py(1)
-                    .rounded(4)
-                    .bg(t.selected)
-                    .text_size(11)
-                    .font_semibold()
-                    .text_color(t.accent)
-                    .child(c.shortHash),
-                )
-                .child(div().flex_1().min_w(0).truncate().font_medium().text_size(12).text_color(t.foreground).child(c.subject)),
-            )
-            .child(
-              div()
-                .pl(28)
-                .text_size(11)
-                .text_color(t.dim)
-                .child(`${c.author} · ${c.relDate} · ${this.commitFiles.length} file${this.commitFiles.length === 1 ? "" : "s"}`),
-            ),
-        )
-        .child(
-          div()
-            .flex_1()
-            .min_h(44)
-            .max_h(Math.min(220, this.commitFiles.length * 26 + 12))
-            .relative()
-            .border_b(1)
-            .border_color(t.border)
-            .child(
-              v_flex()
-                .id("hist-files-list")
-                .absolute()
-                .inset_0()
-                .overflow_y_scroll()
-                .p(6)
-                .children(
-                  this.commitFiles.map(f => {
-                    const parts = f.path.split("/"), name = parts.pop();
-                    return h_flex()
-                      .id(`hf-${f.path}`)
-                      .h(26)
-                      .flex_none()
-                      .px(8)
-                      .gap(8)
-                      .items_center()
-                      .rounded(6)
-                      .cursor_pointer()
-                      .when(this.commitOpenFile === f.path, e => e.bg(t.selected))
-                      .hover(s => s.bg(t.hover))
-                      .on_click((_e, cx) => this.pickCommitFile(f.path, cx))
-                      .child(div().w(14).text_size(11).text_color(statusColor(f.status, t)).child(f.status))
-                      .child(
-                        h_flex()
-                          .flex_1()
-                          .min_w(0)
-                          .child(div().text_size(11.5).text_color(t.dim).truncate().child(parts.length ? parts.join("/") + "/" : ""))
-                          .child(div().text_size(12).max_w(240).min_w(0).truncate().child(name)),
-                      )
-                      .when(f.add > 0, e => e.child(div().text_size(10.5).text_color(t.ansi2).child(`+${f.add}`)))
-                      .when(f.del > 0, e => e.child(div().text_size(10.5).text_color(t.ansi1).child(`−${f.del}`)));
-                  }),
-                )
-                .when(!this.commitFiles.length, e =>
-                  e.child(div().p(8).text_size(12).text_color(t.dim).child(this.commitDetailLoading ? "Loading commit…" : "No files changed")),
-                ),
-            )
-            .child(Scrollbar.vertical("hist-files-list").absolute().inset_0()),
-        )
-        .child(
-          div()
-            .flex_1()
-            .min_h(0)
-            .relative()
-            .font_family(settings().font_family ?? "JetBrains Mono")
-            .text_size(size)
-            .child(
-              div()
-                .id("hist-diff-x")
-                .size_full()
-                .overflow_x_scrollbar()
-                .child(
-                  div()
-                    .w_full()
-                    .min_w(Math.max(300, this.commitLongest * charWidth(size) + this.gutter(this.commitGutterChars, size) + 20))
-                    .h_full()
-                    .child(
-                      v_virtual_list(
-                        "hist-diff",
-                        this.commitRows.length,
-                        rowHeight(size),
-                        (i) => String(i),
-                        (range) => this.commitRows.slice(range.start, range.end).map((row) => this.diffRow(row, t, size, this.commitGutterChars)),
-                      ).size_full(),
-                    ),
-                ),
-            )
-            .child(Scrollbar.vertical("hist-diff").viewport_from_layout().absolute().inset_0()),
-        );
-    }
-
-    return v_flex()
-      .id("hist-commits-list")
-      .flex_1()
-      .min_h(0)
-      .overflow_y_scrollbar()
-      .p(6)
-      .gap(2)
-      .when(Boolean(this.historyError), el =>
-        el.child(div().p(8).text_size(12).text_color(t.ansi1).child(this.historyError)),
-      )
-      .when(!this.commits.length && !this.historyError, el =>
-        el.child(div().p(8).text_size(12).text_color(t.dim).child(this.historyLoading ? "Loading commits…" : "No commits yet")),
-      )
-      .children(
-        this.commits.map(c =>
-          v_flex()
-            .id(`commit-${c.hash}`)
-            .flex_none()
-            .px(8)
-            .py(6)
-            .gap(3)
-            .rounded(7)
-            .cursor_pointer()
-            .hover(s => s.bg(t.hover))
-            .tooltip(`${c.hash}\n${c.subject}\n${c.author} · ${c.relDate}`)
-            .on_click((_e, cx) => this.openCommit(c, cx))
-            .child(
-              h_flex()
-                .gap(6)
-                .items_center()
-                .child(
-                  div()
-                    .px(5)
-                    .py(1)
-                    .rounded(4)
-                    .bg(t.surface)
-                    .text_size(10.5)
-                    .font_semibold()
-                    .text_color(t.accent)
-                    .child(c.shortHash),
-                )
-                .when(c.refs.length > 0, el =>
-                  el.child(
-                    div()
-                      .px(5)
-                      .py(1)
-                      .rounded(4)
-                      .bg(t.ansi2 + "22")
-                      .text_size(10)
-                      .font_semibold()
-                      .text_color(t.ansi2)
-                      .truncate()
-                      .max_w(130)
-                      .child(c.refs[0]),
-                  ),
-                )
-                .child(div().flex_1().min_w(0).truncate().text_size(12).font_medium().text_color(t.foreground).child(c.subject)),
-            )
-            .child(
-              h_flex()
-                .gap(6)
-                .items_center()
-                .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(c.author))
-                .child(div().flex_none().text_size(10.5).text_color(t.dim).child(c.relDate)),
-            ),
-        ),
-      )
-      .when(this.commits.length >= this.historyLimit && !this.historyLoading, el =>
+  sectionHeader(t, id, title, open, count, onToggle, actions = []) {
+    return h_flex()
+      .id(id)
+      .h(26)
+      .flex_none()
+      .px(8)
+      .gap(6)
+      .items_center()
+      .cursor_pointer()
+      .hover(s => s.bg(t.hover))
+      .on_click(onToggle)
+      .child(div().w(10).text_size(10).text_color(t.dim).child(open ? "▾" : "▸"))
+      .child(div().flex_1().min_w(0).truncate().text_size(11.5).font_semibold().text_color(t.muted).child(title))
+      .children(actions)
+      .when(count !== null, el =>
         el.child(
           div()
-            .id("hist-load-more")
-            .mt(4)
-            .py(6)
-            .rounded(6)
+            .px(6)
+            .py(1)
+            .rounded(999)
             .bg(t.surface)
-            .text_center()
-            .text_size(11.5)
+            .text_size(10)
             .text_color(t.muted)
-            .cursor_pointer()
-            .hover(s => s.bg(t.hover).text_color(t.foreground))
-            .on_click((_e, cx) => {
-              this.historyLimit += 50;
-              this.loadHistory(cx, false);
-            })
-            .child("Load 50 more commits"),
+            .child(String(count)),
         ),
+      );
+  }
+
+  fileRow(file, t) {
+    const parts = file.path.split("/");
+    const name = parts.pop();
+    const dir = parts.join("/");
+    const rowId = `sc-${file.staged ? "s" : "u"}-${file.path}`;
+    const isSelected = this.open?.path === file.path && this.open?.staged === file.staged;
+    const isHovered = this.hoveredRow === rowId;
+
+    return h_flex()
+      .id(rowId)
+      .h(26)
+      .flex_none()
+      .pl(14)
+      .pr(8)
+      .gap(6)
+      .items_center()
+      .rounded(6)
+      .cursor_pointer()
+      .when(isSelected, el => el.bg(t.selected))
+      .hover(s => s.bg(isSelected ? t.selected : t.hover))
+      .on_hover((h, cx) => {
+        if (h) this.hoveredRow = rowId;
+        else if (this.hoveredRow === rowId) this.hoveredRow = null;
+        cx.notify();
+      })
+      .on_click((_e, cx) => this.pickDiff(file, cx))
+      .child(image(fileIcon(name)).w(16).h(16).flex_none())
+      .child(div().flex_none().max_w(165).truncate().text_size(12).text_color(t.foreground).child(name))
+      .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(dir))
+      .when(isHovered, el =>
+        el
+          .child(this.actionBtn(t, `${rowId}-open`, "↗", "Open file (Ctrl+Click: new tab)", (e) => this.openInViewer(file.path, e)))
+          .when(!file.staged, r => r
+            .child(this.actionBtn(t, `${rowId}-disc`, "↺", file.untracked ? "Delete untracked file" : "Discard changes", (_e, cx) => this.discardFile(file, cx)))
+            .child(this.actionBtn(t, `${rowId}-add`, "+", "Stage changes", (_e, cx) => this.stageFile(file.path, cx))))
+          .when(file.staged, r => r
+            .child(this.actionBtn(t, `${rowId}-un`, "−", "Unstage changes", (_e, cx) => this.unstageFile(file.path, cx)))),
+      )
+      .child(div().w(14).text_right().text_size(11).font_semibold().text_color(statusColor(file.status, t)).child(file.status));
+  }
+
+  renderCommitDetail(t, size) {
+    const c = this.selectedCommit;
+    return v_flex()
+      .flex_1()
+      .min_h(0)
+      .child(
+        v_flex()
+          .flex_none()
+          .px(10)
+          .py(8)
+          .gap(4)
+          .border_b(1)
+          .border_color(t.border)
+          .child(
+            h_flex()
+              .gap(6)
+              .items_center()
+              .child(this.actionBtn(t, "hist-back", "←", "Back to Source Control", (_e, cx) => {
+                this.selectedCommit = null;
+                this.commitFiles = [];
+                this.commitOpenFile = null;
+                this.setCommitLines([]);
+                cx.notify();
+              }))
+              .child(div().px(5).py(1).rounded(4).bg(t.selected).text_size(11).font_semibold().text_color(t.accent).child(c.shortHash))
+              .child(div().flex_1().min_w(0).truncate().font_medium().text_size(12).text_color(t.foreground).child(c.subject)),
+          )
+          .child(div().pl(24).text_size(11).text_color(t.dim).child(`${c.author} · ${c.relDate} · ${this.commitFiles.length} file${this.commitFiles.length === 1 ? "" : "s"}`)),
+      )
+      .child(
+        div()
+          .flex_1()
+          .min_h(44)
+          .max_h(Math.min(200, this.commitFiles.length * 26 + 12))
+          .relative()
+          .border_b(1)
+          .border_color(t.border)
+          .child(
+            v_flex()
+              .id("hist-files-list")
+              .absolute()
+              .inset_0()
+              .overflow_y_scroll()
+              .p(6)
+              .children(
+                this.commitFiles.map(f => {
+                  const parts = f.path.split("/"), name = parts.pop();
+                  return h_flex()
+                    .id(`hf-${f.path}`)
+                    .h(26)
+                    .flex_none()
+                    .px(8)
+                    .gap(6)
+                    .items_center()
+                    .rounded(6)
+                    .cursor_pointer()
+                    .when(this.commitOpenFile === f.path, e => e.bg(t.selected))
+                    .hover(s => s.bg(t.hover))
+                    .on_click((_e, cx) => this.pickCommitFile(f.path, cx))
+                    .child(image(fileIcon(name)).w(15).h(15).flex_none())
+                    .child(div().flex_none().max_w(160).truncate().text_size(12).text_color(t.foreground).child(name))
+                    .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(parts.join("/")))
+                    .when(f.add > 0, e => e.child(div().text_size(10.5).text_color(t.ansi2).child(`+${f.add}`)))
+                    .when(f.del > 0, e => e.child(div().text_size(10.5).text_color(t.ansi1).child(`−${f.del}`)))
+                    .child(div().w(14).text_right().text_size(11).font_semibold().text_color(statusColor(f.status, t)).child(f.status));
+                }),
+              )
+              .when(!this.commitFiles.length, e =>
+                e.child(div().p(8).text_size(12).text_color(t.dim).child(this.commitDetailLoading ? "Loading commit…" : "No files changed")),
+              ),
+          )
+          .child(Scrollbar.vertical("hist-files-list").absolute().inset_0()),
+      )
+      .child(
+        div()
+          .flex_1()
+          .min_h(0)
+          .relative()
+          .font_family(settings().font_family ?? "JetBrains Mono")
+          .text_size(size)
+          .child(
+            div()
+              .id("hist-diff-x")
+              .size_full()
+              .overflow_x_scrollbar()
+              .child(
+                div()
+                  .w_full()
+                  .min_w(Math.max(300, this.commitLongest * charWidth(size) + this.gutter(this.commitGutterChars, size) + 20))
+                  .h_full()
+                  .child(
+                    v_virtual_list(
+                      "hist-diff",
+                      this.commitRows.length,
+                      rowHeight(size),
+                      (i) => String(i),
+                      (range) => this.commitRows.slice(range.start, range.end).map((row) => this.diffRow(row, t, size, this.commitGutterChars)),
+                    ).size_full(),
+                  ),
+              ),
+          )
+          .child(Scrollbar.vertical("hist-diff").viewport_from_layout().absolute().inset_0()),
       );
   }
 
@@ -759,9 +829,8 @@ export default class ChangesHistory extends View {
       else this.refreshIfDue(cx);
     }
     const t = theme(), size = settings().font_size;
-    const add = this.files.reduce((n, f) => n + f.add, 0), del = this.files.reduce((n, f) => n + f.del, 0);
-    const enabled = Boolean(this.message.trim() && this.root && !this.busy && !this.loading);
-    const isHistory = this.tab === "history";
+    const totalChanges = this.staged.length + this.unstaged.length;
+    const canCommit = Boolean(this.message.trim() && this.root && !this.busy && !this.loading && totalChanges > 0);
 
     return v_flex()
       .id("changes")
@@ -785,194 +854,293 @@ export default class ChangesHistory extends View {
       })
       .child(
         h_flex()
-          .h(42)
+          .h(38)
           .flex_none()
           .px(10)
-          .gap(6)
+          .gap(4)
           .items_center()
           .border_b(1)
           .border_color(t.border)
-          .child(
-            h_flex()
-              .id("tab-changes")
-              .px(8)
-              .py(4)
-              .gap(5)
-              .items_center()
-              .rounded(6)
-              .cursor_pointer()
-              .when(!isHistory, el => el.bg(t.selected))
-              .hover(s => s.bg(!isHistory ? t.selected : t.hover))
-              .on_click((_e, cx) => {
-                this.tab = "changes";
-                cx.notify();
-              })
-              .child(div().font_semibold().text_size(12.5).text_color(!isHistory ? t.foreground : t.muted).child("Changes"))
-              .child(div().px(4).py(0.5).rounded(4).bg(t.surface).text_size(10).text_color(t.muted).child(String(this.files.length))),
-          )
-          .child(
-            h_flex()
-              .id("tab-history")
-              .px(8)
-              .py(4)
-              .gap(5)
-              .items_center()
-              .rounded(6)
-              .cursor_pointer()
-              .when(isHistory, el => el.bg(t.selected))
-              .hover(s => s.bg(isHistory ? t.selected : t.hover))
-              .on_click((_e, cx) => {
-                this.tab = "history";
-                if (this.root && this.historyLoadedFor !== this.root && !this.historyLoading) {
-                  this.loadHistory(cx, true);
-                } else {
-                  cx.notify();
-                }
-              })
-              .child(div().font_semibold().text_size(12.5).text_color(isHistory ? t.foreground : t.muted).child("History"))
-              .when(this.commits.length > 0, el =>
-                el.child(div().px(4).py(0.5).rounded(4).bg(t.surface).text_size(10).text_color(t.muted).child(String(this.commits.length))),
-              ),
+          .child(div().font_semibold().text_size(12.5).child("Changes"))
+          .when(Boolean(this.branch), el =>
+            el.child(div().px(5).py(1).rounded(4).bg(t.surface).text_size(10.5).text_color(t.dim).truncate().max_w(110).child(this.branch)),
           )
           .child(div().flex_1())
-          .when(!isHistory, el =>
+          .when(Boolean(this.root), el =>
             el
-              .child(div().text_size(11).text_color(t.ansi2).child(`+${add}`))
-              .child(div().text_size(11).text_color(t.ansi1).child(`−${del}`)),
-          )
-          .when(isHistory, el =>
-            el.child(
-              div()
-                .id("hist-refresh")
-                .px(6)
-                .py(2)
-                .rounded(5)
-                .text_size(12)
-                .text_color(t.dim)
-                .cursor_pointer()
-                .hover(s => s.bg(t.hover).text_color(t.foreground))
-                .tooltip("Refresh commit history")
-                .on_click((_e, cx) => this.loadHistory(cx, true))
-                .child("↻"),
-            ),
+              .child(this.actionBtn(t, "sc-stash", "S+", "Stash changes (uses message if set)", (_e, cx) => this.stashPush(cx)))
+              .child(this.actionBtn(t, "sc-pull", "↓", "Git pull", (_e, cx) => this.runGitAction(["pull"], cx)))
+              .child(this.actionBtn(t, "sc-push", "↑", "Git push", (_e, cx) => this.runGitAction(["push"], cx)))
+              .child(this.actionBtn(t, "sc-refresh", "↻", "Refresh", (_e, cx) => this.refresh(cx, true))),
           ),
       )
-      .when(isHistory, el => el.child(this.renderHistory(t, size)))
-      .when(!isHistory, el =>
+      .when(Boolean(this.selectedCommit), el => el.child(this.renderCommitDetail(t, size)))
+      .when(!this.selectedCommit, el =>
         el
-          .child(
-            div()
-              .flex_1()
-              .min_h(44)
-              .max_h(this.files.length * 28 + 12)
-              .relative()
-              .border_b(1)
-              .border_color(t.border)
-              .child(
-                v_flex()
-                  .id("changes-list")
-                  .absolute()
-                  .inset_0()
-                  .overflow_y_scroll()
-                  .p(6)
-                  .children(
-                    this.files.map((f) => {
-                      const parts = f.path.split("/"), name = parts.pop();
-                      return h_flex()
-                        .id(`change-${f.path}`)
+          // VS Code-style top Commit Box
+          .when(Boolean(this.root), box =>
+            box.child(
+              v_flex()
+                .flex_none()
+                .p(8)
+                .gap(6)
+                .border_b(1)
+                .border_color(t.border)
+                .child(
+                  div()
+                    .id("commit-message")
+                    .h(30)
+                    .px(8)
+                    .flex()
+                    .items_center()
+                    .rounded(6)
+                    .bg(t.surface)
+                    .border_1()
+                    .border_color(this.typing ? t.accent : t.border)
+                    .cursor_text()
+                    .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+                    .child(Input.new(this.input).flex_1().h_full().text_size(12).text_color(t.foreground)),
+                )
+                .child(
+                  h_flex()
+                    .gap(6)
+                    .child(
+                      div()
+                        .id("commit-btn")
+                        .flex_1()
                         .h(28)
-                        .flex_none()
-                        .px(8)
-                        .gap(8)
+                        .rounded(6)
+                        .flex()
                         .items_center()
-                        .rounded(7)
-                        .cursor_pointer()
-                        .when(this.open === f.path, (e) => e.bg(t.selected))
-                        .hover((s) => s.bg(t.hover))
-                        .on_click((_e, cx) => this.pick(f.path, cx))
-                        .child(div().w(14).text_size(11).text_color(statusColor(f.status, t)).child(f.status))
-                        .child(h_flex().flex_1().min_w(0).child(div().text_color(t.dim).truncate().child(parts.length ? parts.join("/") + "/" : "")).child(div().max_w(260).min_w(0).truncate().child(name)))
-                        .when(f.add > 0, (e) => e.child(div().text_size(11).text_color(t.ansi2).child(`+${f.add}`)))
-                        .when(f.del > 0, (e) => e.child(div().text_size(11).text_color(t.ansi1).child(`−${f.del}`)));
-                    }),
-                  )
-                  .when(!this.files.length, (e) =>
-                    e.child(div().p(8).text_color(t.dim).child(this.error || (this.loading ? "Loading changes…" : this.root ? "No uncommitted changes" : "No folder"))),
-                  ),
-              )
-              .child(Scrollbar.vertical("changes-list").absolute().inset_0()),
+                        .justify_center()
+                        .bg(canCommit ? t.solid : t.raised)
+                        .text_color(canCommit ? t.solid_foreground : t.dim)
+                        .text_size(12)
+                        .font_medium()
+                        .when(canCommit, b => b.cursor_pointer())
+                        .on_click((_e, cx) => this.commit(cx))
+                        .child(this.busy ? "Working…" : this.staged.length > 0 ? `✓ Commit (${this.staged.length} staged)` : "✓ Commit"),
+                    ),
+                ),
+            ),
           )
-          .when(this.limited, lim => lim.child(div().px(12).py(4).text_size(11).text_color(t.dim).child("Showing the first 1,000 changed files")))
+          .when(Boolean(this.note), el =>
+            el.child(
+              h_flex()
+                .px(10)
+                .py(5)
+                .gap(6)
+                .items_center()
+                .border_b(1)
+                .border_color(t.border)
+                .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.ansi1).child(this.note))
+                .child(this.actionBtn(t, "sc-note-x", "×", "Dismiss", (_e, cx) => { this.note = null; cx.notify(); })),
+            ),
+          )
+          // Main scrollable VS Code sections (Staged, Changes, Stashes, Graph)
           .child(
-            div()
+            v_flex()
+              .id("sc-sections")
               .flex_1()
               .min_h(0)
-              .relative()
-              .font_family(settings().font_family ?? "JetBrains Mono")
-              .text_size(size)
-              .child(
-                div()
-                  .id("changes-diff-x")
-                  .size_full()
-                  .overflow_x_scrollbar()
+              .overflow_y_scrollbar()
+              .py(4)
+              .when(!this.root, e =>
+                e.child(div().p(12).text_size(12).text_color(t.dim).child(this.error || (this.loading ? "Loading…" : "Not a git repository"))),
+              )
+              .when(Boolean(this.root), body =>
+                body
+                  // Staged Changes
+                  .when(this.staged.length > 0, s =>
+                    s
+                      .child(this.sectionHeader(t, "sec-staged", "Staged Changes", this.secStaged, this.staged.length, (_e, cx) => {
+                        this.secStaged = !this.secStaged;
+                        cx.notify();
+                      }, [this.actionBtn(t, "sc-unstage-all", "−", "Unstage all", (_e, cx) => this.unstageAll(cx))]))
+                      .when(this.secStaged, list => list.child(v_flex().px(4).pb(4).children(this.staged.map(f => this.fileRow(f, t))))),
+                  )
+                  // Changes (Unstaged)
+                  .child(this.sectionHeader(t, "sec-changes", "Changes", this.secChanges, this.unstaged.length, (_e, cx) => {
+                    this.secChanges = !this.secChanges;
+                    cx.notify();
+                  }, this.unstaged.length > 0 ? [
+                    this.actionBtn(t, "sc-stash-sec", "S+", "Stash all changes", (_e, cx) => this.stashPush(cx)),
+                    this.actionBtn(t, "sc-stage-all", "+", "Stage all changes", (_e, cx) => this.stageAll(cx)),
+                  ] : []))
+                  .when(this.secChanges, list =>
+                    list.child(
+                      v_flex()
+                        .px(4)
+                        .pb(4)
+                        .children(this.unstaged.map(f => this.fileRow(f, t)))
+                        .when(!this.unstaged.length && !this.staged.length, empty =>
+                          empty.child(div().px(14).py(6).text_size(11.5).text_color(t.dim).child("No uncommitted changes")),
+                        ),
+                    ),
+                  )
+                  // Stashes
                   .child(
                     div()
-                      .w_full()
-                      .min_w(Math.max(300, this.longest * charWidth(size) + this.gutter(this.gutterChars, size) + 20))
-                      .h_full()
-                      .child(
-                        v_virtual_list(
-                          "changes-diff",
-                          this.rows.length,
-                          rowHeight(size),
-                          (i) => String(i),
-                          (range) => this.rows.slice(range.start, range.end).map((row) => this.diffRow(row, t, size, this.gutterChars)),
-                        ).size_full(),
-                      ),
+                      .mt(2)
+                      .border_t(1)
+                      .border_color(t.border)
+                      .child(this.sectionHeader(t, "sec-stashes", "Stashes", this.secStashes, this.stashes.length, (_e, cx) => {
+                        this.secStashes = !this.secStashes;
+                        cx.notify();
+                      }, [this.actionBtn(t, "sc-stash-add", "+", "Create stash", (_e, cx) => this.stashPush(cx))])),
+                  )
+                  .when(this.secStashes, list =>
+                    list.child(
+                      v_flex()
+                        .px(6)
+                        .pb(4)
+                        .gap(2)
+                        .when(!this.stashes.length, empty =>
+                          empty.child(div().px(10).py(4).text_size(11.5).text_color(t.dim).child("No stashes")),
+                        )
+                        .children(
+                          this.stashes.map(st =>
+                            h_flex()
+                              .id(`stash-${st.ref}`)
+                              .h(26)
+                              .px(8)
+                              .gap(4)
+                              .items_center()
+                              .rounded(6)
+                              .hover(s => s.bg(t.hover))
+                              .tooltip(`${st.ref}\n${st.message}\n${st.relDate}`)
+                              .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.foreground).child(st.message))
+                              .child(this.actionBtn(t, `st-apply-${st.ref}`, "Apply", "Apply stash (keep in list)", (_e, cx) => this.stashApply(st.ref, cx)))
+                              .child(this.actionBtn(t, `st-pop-${st.ref}`, "Pop", "Pop stash (apply & remove)", (_e, cx) => this.stashPop(st.ref, cx)))
+                              .child(this.actionBtn(t, `st-drop-${st.ref}`, "×", "Drop stash", (_e, cx) => this.stashDrop(st.ref, cx))),
+                          ),
+                        ),
+                    ),
+                  )
+                  // Graph / Commit History
+                  .child(
+                    div()
+                      .mt(2)
+                      .border_t(1)
+                      .border_color(t.border)
+                      .child(this.sectionHeader(t, "sec-graph", "Graph", this.secGraph, this.commits.length || null, (_e, cx) => {
+                        this.secGraph = !this.secGraph;
+                        if (this.secGraph && this.historyLoadedFor !== this.root && !this.historyLoading) {
+                          this.loadHistory(cx, true);
+                        } else {
+                          cx.notify();
+                        }
+                      }, this.secGraph ? [this.actionBtn(t, "sc-hist-ref", "↻", "Refresh history", (_e, cx) => this.loadHistory(cx, true))] : [])),
+                  )
+                  .when(this.secGraph, list =>
+                    list.child(
+                      v_flex()
+                        .px(4)
+                        .pb(6)
+                        .gap(1)
+                        .when(Boolean(this.historyError), e => e.child(div().px(10).py(6).text_size(11.5).text_color(t.ansi1).child(this.historyError)))
+                        .when(!this.commits.length && !this.historyError, e =>
+                          e.child(div().px(10).py(6).text_size(11.5).text_color(t.dim).child(this.historyLoading ? "Loading commits…" : "No commits yet")),
+                        )
+                        .children(
+                          this.commits.map(c =>
+                            h_flex()
+                              .id(`commit-${c.hash}`)
+                              .h(26)
+                              .px(8)
+                              .gap(6)
+                              .items_center()
+                              .rounded(6)
+                              .cursor_pointer()
+                              .hover(s => s.bg(t.hover))
+                              .tooltip(`${c.shortHash} · ${c.subject}\n${c.author} · ${c.relDate}`)
+                              .on_click((_e, cx) => this.openCommit(c, cx))
+                              .child(div().size(7).flex_none().rounded(999).bg(c.refs.length ? t.ansi2 : t.accent))
+                              .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.foreground).child(c.subject))
+                              .when(c.refs.length > 0, el =>
+                                el.child(div().px(4).py(0.5).rounded(4).bg(t.ansi2 + "22").text_size(9.5).font_semibold().text_color(t.ansi2).truncate().max_w(75).child(c.refs[0].replace(/^HEAD -> /, ""))),
+                              )
+                              .child(div().flex_none().text_size(10.5).text_color(t.dim).child(c.shortHash)),
+                          ),
+                        )
+                        .when(this.commits.length >= this.historyLimit && !this.historyLoading, el =>
+                          el.child(
+                            div()
+                              .id("hist-load-more")
+                              .mt(4)
+                              .mx(6)
+                              .py(5)
+                              .rounded(6)
+                              .bg(t.surface)
+                              .text_center()
+                              .text_size(11)
+                              .text_color(t.muted)
+                              .cursor_pointer()
+                              .hover(s => s.bg(t.hover).text_color(t.foreground))
+                              .on_click((_e, cx) => {
+                                this.historyLimit += 50;
+                                this.loadHistory(cx, false);
+                              })
+                              .child("Load 50 more commits"),
+                          ),
+                        ),
+                    ),
                   ),
-              )
-              .child(Scrollbar.vertical("changes-diff").viewport_from_layout().absolute().inset_0())
-              .when(!this.open && this.files.length > 0, (e) => e.child(div().absolute().top(6).px(12).text_size(11).text_color(t.dim).child("Select a file to view its changes"))),
-          )
-          .when(Boolean(this.note), (e) => e.child(div().px(10).pb(8).text_size(11).text_color(t.ansi1).child(this.note)))
-          .child(
-            h_flex()
-              .flex_none()
-              .p(10)
-              .gap(8)
-              .border_t(1)
-              .border_color(t.border)
-              .child(
-                div()
-                  .id("commit-message")
-                  .flex_1()
-                  .min_w(0)
-                  .h(32)
-                  .px(10)
-                  .flex()
-                  .items_center()
-                  .rounded(8)
-                  .border_1()
-                  .border_color(this.typing ? t.accent : t.border)
-                  .cursor_text()
-                  .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-                  .child(Input.new(this.input).h_full().text_size(12).text_color(t.foreground)),
-              )
-              .child(
-                div()
-                  .id("commit")
-                  .h(32)
-                  .px(14)
-                  .flex()
-                  .items_center()
-                  .rounded(8)
-                  .bg(enabled ? t.solid : t.raised)
-                  .text_color(enabled ? t.solid_foreground : t.dim)
-                  .text_size(12)
-                  .when(enabled, (e) => e.cursor_pointer())
-                  .on_click((_e, cx) => this.commit(cx))
-                  .child(this.busy ? "Committing…" : "Commit"),
               ),
+          )
+          // Inline Diff preview when a file is clicked
+          .when(Boolean(this.open), diffArea =>
+            diffArea.child(
+              v_flex()
+                .flex_1()
+                .min_h(120)
+                .border_t(1)
+                .border_color(t.border)
+                .child(
+                  h_flex()
+                    .h(26)
+                    .flex_none()
+                    .px(10)
+                    .gap(6)
+                    .items_center()
+                    .bg(t.surface)
+                    .border_b(1)
+                    .border_color(t.border)
+                    .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.muted).child(`${this.open.staged ? "Staged: " : ""}${this.open.path}`))
+                    .child(this.actionBtn(t, "sc-diff-open", "↗", "Open in viewer", (e) => this.openInViewer(this.open.path, e)))
+                    .child(this.actionBtn(t, "sc-diff-x", "×", "Close diff", (_e, cx) => { this.open = null; this.setLines([]); cx.notify(); })),
+                )
+                .child(
+                  div()
+                    .flex_1()
+                    .min_h(0)
+                    .relative()
+                    .font_family(settings().font_family ?? "JetBrains Mono")
+                    .text_size(size)
+                    .child(
+                      div()
+                        .id("changes-diff-x")
+                        .size_full()
+                        .overflow_x_scrollbar()
+                        .child(
+                          div()
+                            .w_full()
+                            .min_w(Math.max(300, this.longest * charWidth(size) + this.gutter(this.gutterChars, size) + 20))
+                            .h_full()
+                            .child(
+                              v_virtual_list(
+                                "changes-diff",
+                                this.rows.length,
+                                rowHeight(size),
+                                (i) => String(i),
+                                (range) => this.rows.slice(range.start, range.end).map((row) => this.diffRow(row, t, size, this.gutterChars)),
+                              ).size_full(),
+                            ),
+                        ),
+                    )
+                    .child(Scrollbar.vertical("changes-diff").viewport_from_layout().absolute().inset_0()),
+                ),
+            ),
           ),
       );
   }
