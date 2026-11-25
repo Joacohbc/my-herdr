@@ -340,6 +340,8 @@ export default class FileViewer extends View {
     const isSvg = this.kind === "svg";
     cx.spawn(async cx => {
       try {
+        await cx.sleep(0);
+        if (this.loadSeq !== seq || this.previewMode) return;
         let content = existingRaw;
         if (content === null && isSvg && file && this.root) {
           const text = await readTextFile(fullPath, { on });
@@ -351,8 +353,8 @@ export default class FileViewer extends View {
         this.code?.release();
         this.code = createReadonlyEditor(file, content, this.softWrap);
         if (this.highlightRange) this.code.set_selected_range(this.highlightRange);
-      } catch {
-        // ignore
+      } catch (e) {
+        if (this.loadSeq === seq) this.error = String(e?.message || e);
       } finally {
         if (this.loadSeq === seq) cx.notify();
       }
