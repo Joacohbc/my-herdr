@@ -45,7 +45,7 @@ export async function resolveNode(configuredNode) {
   const path = (res.stdout || "").trim().split("\n").pop();
   if (res.code === 0 && path?.startsWith("/")) return { path };
   if (configuredNode) return { error: `"node": "${configuredNode}" in ${CONFIG_FILE_NAME} is not a node binary or Node home` };
-  return { error: `node not found in PATH; set "node" (binary or Node home) in ~/.config/herdr-app/${CONFIG_FILE_NAME}` };
+  return { error: `Node.js not found. Install it or set "node" (binary or Node home) in ~/.config/herdr-app/${CONFIG_FILE_NAME}` };
 }
 
 export async function runCollector(nodePath, { claude, agy, claudeQuota, antigravityQuota }) {

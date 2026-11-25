@@ -308,12 +308,24 @@ function run(file, argv, timeout) {
   });
 }
 
-async function resolveBinary(name) {
+const BINARY_MISS_TTL_MS = 30 * MINUTE_MS;
+
+// A miss is remembered so an absent CLI does not cost an interactive shell every refresh;
+// changing the configured path invalidates it.
+async function resolveBinary(name, cache) {
   const configured = argValue(name);
+  const misses = (cache.binaryMisses ??= {});
+  const miss = misses[name];
+  if (miss && miss.configured === configured && now - miss.at < BINARY_MISS_TTL_MS) return { missing: true, error: miss.error };
   const res = await run("sh", ["-c", RESOLVE_BIN_SCRIPT, "sh", configured, name], CLI_TIMEOUT_MS);
   const path = res.stdout.trim().split("\n").pop();
-  if (path?.startsWith("/")) return { path };
-  return { error: configured ? `"${name}": "${configured}" is not executable` : `${name} not found (set "${name}" in ai-usage.json)` };
+  if (path?.startsWith("/")) {
+    delete misses[name];
+    return { path };
+  }
+  const error = configured ? `"${name}": "${configured}" is not executable` : `${name} CLI not found`;
+  misses[name] = { at: now, configured, error };
+  return { missing: true, error };
 }
 
 const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
@@ -374,11 +386,11 @@ async function removeEmptySessionEnvDirs() {
 
 async function fetchClaudeQuota(cache) {
   if (args.has("--no-quota")) return { disabled: true };
-  if (cache.quota && now - cache.quota.at < QUOTA_TTL_MS) return cache.quota.data;
+  if (cache.quota && cache.quota.configured === argValue("claude") && now - cache.quota.at < QUOTA_TTL_MS) return cache.quota.data;
   let data;
-  const claude = await resolveBinary("claude");
-  if (claude.error) {
-    data = { error: claude.error };
+  const claude = await resolveBinary("claude", cache);
+  if (claude.missing) {
+    data = { error: claude.error, missingCli: true };
   } else {
     const res = await run(claude.path, ["-p", "/usage", "--output-format", "json", "--no-session-persistence"], CLI_TIMEOUT_MS);
     try {
@@ -390,7 +402,7 @@ async function fetchClaudeQuota(cache) {
       data = { error: res.ok ? "unexpected claude output" : "claude /usage failed" };
     }
   }
-  cache.quota = { at: now, data };
+  cache.quota = { at: now, configured: argValue("claude"), data };
   return data;
 }
 
@@ -408,11 +420,11 @@ function toAntigravityGroups(command) {
 // `agy -p /usage` is answered locally by the CLI (no model turn, zero tokens).
 async function fetchAntigravityQuota(cache) {
   if (args.has("--no-agy-quota")) return { disabled: true };
-  if (cache.agyQuota && now - cache.agyQuota.at < QUOTA_TTL_MS) return cache.agyQuota.data;
+  if (cache.agyQuota && cache.agyQuota.configured === argValue("agy") && now - cache.agyQuota.at < QUOTA_TTL_MS) return cache.agyQuota.data;
   let data;
-  const agy = await resolveBinary("agy");
-  if (agy.error) {
-    data = { error: agy.error };
+  const agy = await resolveBinary("agy", cache);
+  if (agy.missing) {
+    data = { error: agy.error, missingCli: true };
   } else {
     const res = await run(agy.path, ["-p", "/usage", "--output-format", "json"], CLI_TIMEOUT_MS);
     try {
@@ -423,7 +435,7 @@ async function fetchAntigravityQuota(cache) {
       data = { error: res.ok ? "unexpected agy output" : "agy /usage failed" };
     }
   }
-  cache.agyQuota = { at: now, data };
+  cache.agyQuota = { at: now, configured: argValue("agy"), data };
   return data;
 }
 
@@ -493,6 +505,10 @@ function summarizeAntigravity(generations) {
   return { models: ranked, week, window, conversations: null };
 }
 
+function isCliPresent(quota) {
+  return Boolean(quota) && !quota.disabled && !quota.missingCli;
+}
+
 async function main() {
   const cache = loadCache();
   const [claudeBuckets, antigravityGenerations] = await Promise.all([
@@ -504,6 +520,8 @@ async function main() {
   const antigravity = summarizeAntigravity(antigravityGenerations);
   antigravity.conversations = Object.keys(cache.antigravityDbs).length;
   antigravity.quota = await fetchAntigravityQuota(cache);
+  claude.installed = existsSync(CLAUDE_PROJECTS_DIR) || isCliPresent(claude.quota);
+  antigravity.installed = ANTIGRAVITY_CONVERSATION_DIRS.some(dir => existsSync(dir)) || isCliPresent(antigravity.quota);
   saveCache(cache);
   await removeEmptySessionEnvDirs();
   process.stdout.write(JSON.stringify({ at: now, claude, antigravity }));

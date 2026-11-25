@@ -58,6 +58,7 @@ export default class AiUsage extends View {
     this.error = null;
     this.loading = false;
     this.nodePath = null;
+    this.nodeMissing = false;
     this.lastPollAt = 0;
     this.hiddenSince = 0;
     this.ticks = 0;
@@ -125,11 +126,13 @@ export default class AiUsage extends View {
       this.error = config.error;
       return;
     }
+    if (!this.nodePath && this.nodeMissing && this.nodeConfig === config.node) return;
     if (!this.nodePath || this.nodeConfig !== config.node) {
       const resolved = await resolveNode(config.node);
       this.nodeConfig = config.node;
       this.nodePath = resolved.path ?? null;
-      if (!this.nodePath) {
+      this.nodeMissing = !this.nodePath;
+      if (this.nodeMissing) {
         this.error = resolved.error;
         return;
       }
@@ -275,7 +278,7 @@ export default class AiUsage extends View {
           quota.sevenDayOpus && this.renderQuotaRow("Weekly Opus", quota.sevenDayOpus, t),
           quota.sevenDaySonnet && this.renderQuotaRow("Weekly Sonnet", quota.sevenDaySonnet, t),
         ]
-      : [quota?.disabled ? null : this.renderNote(`Quota unavailable: ${quota?.error ?? "not loaded"}`, t.blocked, t)];
+      : [this.renderQuotaProblem(quota, "claude", t)];
     return this.renderSection("Claude Code", quota?.plan ?? "", [
       ...quotaRows,
       this.renderNote(`5h block: ${formatCount(window5h.messages)} msgs · ${formatCount(window5h.tokens)} tok${blockReset}`, null, t),
@@ -284,9 +287,14 @@ export default class AiUsage extends View {
     ], t);
   }
 
+  renderQuotaProblem(quota, cliName, t) {
+    if (!quota || quota.disabled) return null;
+    if (quota.missingCli) return this.renderNote(`Quota needs the ${cliName} CLI (or set "${cliName}" in ai-usage.json).`, null, t);
+    return this.renderNote(`Quota unavailable: ${quota.error ?? "not loaded"}`, t.blocked, t);
+  }
+
   renderAntigravityQuota(quota, t) {
-    if (!quota || quota.disabled) return [];
-    if (quota.error) return [this.renderNote(`Quota unavailable: ${quota.error}`, t.blocked, t)];
+    if (!quota?.groups) return [this.renderQuotaProblem(quota, "agy", t)];
     return quota.groups.flatMap(group => {
       const groupLabel = group.name.replace(/\s*models?$/i, "").replace(/\s+and\s+/i, "/");
       return group.windows.map(entry => this.renderQuotaRow(`${groupLabel} ${entry.window === "5h" ? "5h" : "weekly"}`, entry, t));
@@ -308,7 +316,7 @@ export default class AiUsage extends View {
     if (hasQuota(quota)) {
       if (quota.fiveHour) parts.push(`5h ${Math.round(quota.fiveHour.pct)}%`);
       if (quota.sevenDay) parts.push(`wk ${Math.round(quota.sevenDay.pct)}%`);
-    } else if (this.data?.claude) {
+    } else if (this.data?.claude && this.data.claude.installed !== false) {
       parts.push(`5h ${formatCount(this.data.claude.window.messages)} msgs`);
     }
     const gemini5h = this.data?.antigravity?.quota?.groups?.find(group => /gemini/i.test(group.name))?.windows.find(entry => entry.window === "5h");
@@ -352,14 +360,15 @@ export default class AiUsage extends View {
             .text_color(t.muted)
             .cursor_pointer()
             .hover(s => s.bg(t.hover).text_color(t.foreground))
-            .on_click((_e, cx) => { this.nodePath = null; this.refresh(cx); })
+            .on_click((_e, cx) => { this.nodePath = null; this.nodeMissing = false; this.refresh(cx); })
             .child(this.loading ? "…" : "↻"),
         ),
       );
   }
 
   renderMiniSummary(t) {
-    const text = this.data ? this.miniSummaryText() : this.error ?? "Collecting usage…";
+    const summary = this.data ? this.miniSummaryText() || "No Claude Code or Antigravity found" : null;
+    const text = summary ?? (this.nodeMissing ? "Node.js not found" : this.error ?? "Collecting usage…");
     return h_flex()
       .h(30)
       .flex_none()
@@ -367,7 +376,7 @@ export default class AiUsage extends View {
       .gap(6)
       .items_center()
       .child(svg(USAGE_ICON).size(15).flex_none().text_color(t.muted))
-      .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(this.data ? t.foreground : this.error ? t.blocked : t.dim).child(text));
+      .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(this.data ? t.foreground : this.error && !this.nodeMissing ? t.blocked : t.dim).child(text));
   }
 
   renderRail(t) {
@@ -387,13 +396,16 @@ export default class AiUsage extends View {
 
   renderBody(t) {
     if (!this.data) {
-      const text = this.error ? `Usage unavailable: ${this.error}` : "Collecting usage…";
-      return div().px(10).py(6).text_size(10.5).text_color(this.error ? t.blocked : t.dim).child(text);
+      const text = this.nodeMissing ? this.error : this.error ? `Usage unavailable: ${this.error}` : "Collecting usage…";
+      return div().px(10).py(6).text_size(10.5).text_color(this.error && !this.nodeMissing ? t.blocked : t.dim).child(text);
     }
+    const showClaude = this.data.claude && this.data.claude.installed !== false;
+    const showAntigravity = this.data.antigravity && this.data.antigravity.installed !== false;
     return v_flex()
-      .when(Boolean(this.error), el => el.child(div().px(10).py(2).text_size(10).text_color(t.blocked).child(this.error)))
-      .when(Boolean(this.data.claude), el => el.child(this.renderClaude(this.data.claude, t)))
-      .when(Boolean(this.data.antigravity), el => el.child(this.renderAntigravity(this.data.antigravity, t)));
+      .when(Boolean(this.error), el => el.child(div().px(10).py(2).text_size(10).text_color(this.nodeMissing ? t.dim : t.blocked).child(this.error)))
+      .when(!showClaude && !showAntigravity, el => el.child(div().px(10).py(6).text_size(10.5).text_color(t.dim).child("No Claude Code or Antigravity found.")))
+      .when(showClaude, el => el.child(this.renderClaude(this.data.claude, t)))
+      .when(showAntigravity, el => el.child(this.renderAntigravity(this.data.antigravity, t)));
   }
 
   render() {
