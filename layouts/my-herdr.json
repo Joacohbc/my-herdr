@@ -24,6 +24,7 @@
         {
           "id": "sidebar-lists",
           "type": "column",
+          "resizable": false,
           "children": [
             {
               "id": "spaces",
@@ -43,7 +44,7 @@
                 "mod": "agents-custom"
               },
               "size": {
-                "weight": 1
+                "px": 160
               },
               "min": 60
             },
@@ -54,7 +55,7 @@
                 "mod": "system-monitor"
               },
               "size": {
-                "weight": 1
+                "px": 200
               },
               "min": 62
             },
@@ -65,7 +66,7 @@
                 "mod": "ports-monitor"
               },
               "size": {
-                "weight": 1
+                "px": 160
               },
               "min": 64
             }

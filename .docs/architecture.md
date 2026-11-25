@@ -61,7 +61,7 @@ Cada mod gestiona su memoria en tres capas complementarias:
 
 ---
 
-## 4. Decisiones de Arquitectura (`D1`–`D16`)
+## 4. Decisiones de Arquitectura (`D1`–`D17`)
 
 | ID | Decisión | Alternativa descartada y motivo |
 | --- | --- | --- |
@@ -81,3 +81,4 @@ Cada mod gestiona su memoria en tres capas complementarias:
 | **D14** | Reemplazar cualquier intento de navegador embebido por el popup ligero `mods/web-launcher/` (abierto desde el botón `Web` de `tabs-custom`), con detección automática de URL en el portapapeles, selector de perfiles reales de Chrome (`~/.config/google-chrome/Local State`) + `Clean` efímero, y lanzamiento como pestaña normal o ventana `--app`. | GPUI (`gpui-kit`) carece de WebView nativo; renderizar páginas por capturas JPEG no reemplaza la fluidez/audio de un navegador real y consume procesos extra. Un lanzador popup efímero aporta cero RAM en reposo y acceso en un clic al navegador real con el perfil deseado. |
 | **D15** | Incorporar `mods/ports-monitor/` como bloque independiente en la barra lateral izquierda (junto a `system-monitor` y `agents-custom`), haciendo que los tres bloques soporten colapso/modo compacto vía `layout.resize` y deteniendo por completo el polling de `system-monitor` y `ports-monitor` cuando están minimizados. | Unificar puertos dentro de `system-monitor` saturaría el panel y acoplaría dos responsabilidades distintas; mantenerlos separados con colapso real y pausa de muestreo (`ss`/`ps`) garantiza bajo consumo de CPU/RAM y máximo espacio útil en el sidebar. |
 | **D16** | Enlazar `Ctrl + Shift + P` al overlay efímero `mods/command-palette/` con soporte de prefijo `>`, aliases configurables en `command-aliases.json` y diálogo de creación/edición rápida (`micro`/`nano`), manteniendo además entradas `"palette"` en los `mod.json` para compatibilidad con `app.palette`. | La paleta nativa `app.palette` solo filtra comandos estáticos y no permite interceptar `>` para ejecutar comandos arbitrarios en terminal ni cargar aliases desde un archivo externo configurable. Un overlay efímero (`"place": "none"`) consume cero RAM en reposo y funciona incluso cuando el panel `Files` está oculto. |
+| **D17** | Configurar `sidebar-lists` con `"resizable": false`, definir `agents`, `system-monitor` y `ports-monitor` en `px` con `spaces` como único bloque elástico (`weight: 1`, `min: 90`), e implementar un manejador superior de *resize por empuje* (`stack-resize.js` duplicado por mod debido al sandbox). | El divisor nativo de GPUI/Herdr solo redimensiona bloques inmediatamente adyacentes, por lo que quedaba bloqueado cuando el bloque superior estaba en su mínimo o encogía al vecino en lugar de empujarlo hacia arriba preservando su tamaño actual. |

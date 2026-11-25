@@ -8,8 +8,15 @@ import {
   setShared,
   openOverlay,
   run,
+  layout,
   checking,
 } from "herdr";
+import { STACK, BRAND_PX, snapshotHeights, pushResize } from "./stack-resize.js";
+
+const OWN_ID = "ports-monitor";
+const COLLAPSED_PX = 64;
+const DEFAULT_EXPANDED = 160;
+const EXPANDED_KEY = "ports.expandedPx";
 import {
   buildSharedHttpList,
   MAX_PROBE_CACHE,
@@ -68,6 +75,9 @@ export default class PortsMonitor extends View {
     this.probeCache = new Map();
     this.probingKeys = new Set();
     this.lastGcSeq = shared("herdr.gc")?.seq ?? 0;
+    this.drag = null;
+    this.handleHover = false;
+    this.initAt = Date.now();
 
     if (checking()) return;
 
@@ -95,14 +105,35 @@ export default class PortsMonitor extends View {
     });
   }
 
+  startDrag(e) {
+    const z = settings().zoom || 1;
+    const heights = snapshotHeights(layout(), OWN_ID, this.blockHeight);
+    const ownTop = (e.bounds?.y ?? e.position.y) / z;
+    const above = STACK.slice(0, STACK.indexOf(OWN_ID)).reduce((s, id) => s + heights[id], 0);
+    const spacesH = Math.max(90, ownTop - BRAND_PX - above);
+    this.drag = { startY: e.position.y, heights, spacesH, last: { ...heights } };
+  }
+
+  endDrag() {
+    const h = this.drag?.last?.[OWN_ID];
+    this.drag = null;
+    if (h && h > COLLAPSED_PX + 24) {
+      try { localStorage.setItem(EXPANDED_KEY, String(h)); } catch {}
+    }
+  }
+
   toggleCollapsed(cx) {
     this.collapsed = !this.collapsed;
     try { localStorage.setItem("ports.collapsed", this.collapsed ? "1" : "0"); } catch {}
     if (this.collapsed) {
+      if (this.blockHeight > COLLAPSED_PX + 24) {
+        try { localStorage.setItem(EXPANDED_KEY, String(Math.round(this.blockHeight))); } catch {}
+      }
       this.probeCache.clear();
-      run("layout.resize", { id: "ports-monitor", px: 64 });
+      run("layout.resize", { id: OWN_ID, px: COLLAPSED_PX });
     } else {
-      run("layout.resize", { id: "ports-monitor", weight: 1 });
+      const px = Number(localStorage.getItem(EXPANDED_KEY)) || DEFAULT_EXPANDED;
+      run("layout.resize", { id: OWN_ID, px });
       this.refresh(cx);
     }
     cx.notify();
@@ -275,6 +306,7 @@ export default class PortsMonitor extends View {
 
     return v_flex()
       .id("ports-monitor-root")
+      .relative()
       .size_full()
       .min_w(0)
       .min_h(0)
@@ -284,11 +316,33 @@ export default class PortsMonitor extends View {
       .text_color(t.foreground)
       .when(Boolean(fontFamily), el => el.font_family(fontFamily))
       .on_size_change((size, cx) => {
+        let changed = false;
         if (Math.abs(size.width - this.width) >= 10 || Math.abs(size.height - this.blockHeight) >= 6) {
           this.width = size.width;
           this.blockHeight = size.height;
-          cx.notify();
+          changed = true;
         }
+        if (this.collapsed && Date.now() - this.initAt > 1500 && size.height >= COLLAPSED_PX + 30) {
+          this.collapsed = false;
+          try { localStorage.setItem("ports.collapsed", "0"); } catch {}
+          this.refresh(cx);
+          changed = true;
+        }
+        if (changed) cx.notify();
+      })
+      .on_window_mouse_move((e, cx) => {
+        if (!this.drag) return;
+        if (e.pressed_button !== "left") { this.endDrag(); cx.notify(); return; }
+        const z = settings().zoom || 1;
+        const dy = ((e.position?.y ?? 0) - this.drag.startY) / z;
+        const next = pushResize({ heights: this.drag.heights, spacesH: this.drag.spacesH, targetId: OWN_ID, dy });
+        for (const id of STACK) if (next[id] !== this.drag.last[id]) run("layout.resize", { id, px: next[id] });
+        this.drag.last = next;
+      })
+      .on_window_mouse_up("left", (_e, cx) => {
+        if (!this.drag) return;
+        this.endDrag();
+        cx.notify();
       })
       .when(isRail, el => el.child(this.renderRail(t, visible)))
       .when(!isRail, el =>
@@ -501,6 +555,19 @@ export default class PortsMonitor extends View {
                   ),
               ),
           ),
+      )
+      .child(
+        div()
+          .id("pm-resize-handle")
+          .absolute()
+          .top(0)
+          .left(0)
+          .right(0)
+          .h(6)
+          .cursor_ns_resize()
+          .on_hover((on, cx) => { this.handleHover = on; cx.notify(); })
+          .on_mouse_down("left", (e, cx) => { cx.stop_propagation(); this.startDrag(e); cx.notify(); })
+          .child(div().h(this.drag || this.handleHover ? 2 : 1).w_full().when(Boolean(this.drag || this.handleHover), el => el.bg(t.accent))),
       );
   }
 }

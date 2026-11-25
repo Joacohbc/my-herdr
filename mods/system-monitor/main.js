@@ -1,6 +1,12 @@
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { exec, hc, theme, settings, window, panes, shared, setShared, checking, run } from "herdr";
+import { exec, hc, theme, settings, window, panes, shared, setShared, checking, run, layout } from "herdr";
+import { STACK, BRAND_PX, snapshotHeights, pushResize } from "./stack-resize.js";
+
+const OWN_ID = "system-monitor";
+const COLLAPSED_PX = 62;
+const DEFAULT_EXPANDED = 200;
+const EXPANDED_KEY = "sys.expandedPx";
 
 const ACTIVE_POLL_MS = 3000;
 const UNFOCUSED_POLL_MS = 8000;
@@ -152,6 +158,9 @@ export default class SystemMonitor extends View {
     this.collapsed = localStorage.getItem("sys.collapsed") === "1";
     this.blockHeight = 200;
     this.error = null;
+    this.drag = null;
+    this.handleHover = false;
+    this.initAt = Date.now();
 
     if (checking()) return;
     if (this.collapsed) {
@@ -467,6 +476,23 @@ export default class SystemMonitor extends View {
       );
   }
 
+  startDrag(e) {
+    const z = settings().zoom || 1;
+    const heights = snapshotHeights(layout(), OWN_ID, this.blockHeight);
+    const ownTop = (e.bounds?.y ?? e.position.y) / z;
+    const above = STACK.slice(0, STACK.indexOf(OWN_ID)).reduce((s, id) => s + heights[id], 0);
+    const spacesH = Math.max(90, ownTop - BRAND_PX - above);
+    this.drag = { startY: e.position.y, heights, spacesH, last: { ...heights } };
+  }
+
+  endDrag() {
+    const h = this.drag?.last?.[OWN_ID];
+    this.drag = null;
+    if (h && h > COLLAPSED_PX + 24) {
+      try { localStorage.setItem(EXPANDED_KEY, String(h)); } catch {}
+    }
+  }
+
   render(cx) {
     const t = theme();
     const fontFamily = settings().font_family ?? settings().font;
@@ -474,6 +500,7 @@ export default class SystemMonitor extends View {
 
     return v_flex()
       .id("system-monitor")
+      .relative()
       .size_full()
       .min_h(0)
       .bg(t.chrome)
@@ -483,13 +510,36 @@ export default class SystemMonitor extends View {
       .text_size(12)
       .when(Boolean(fontFamily), el => el.font_family(fontFamily))
       .on_size_change((size, cx) => {
-        const w = size.width / settings().zoom;
-        const h = size.height / settings().zoom;
+        const z = settings().zoom || 1;
+        const w = size.width / z;
+        const h = size.height / z;
+        let changed = false;
         if (Math.abs(w - this.width) > 2 || Math.abs(h - this.blockHeight) >= 6) {
           this.width = w;
           this.blockHeight = h;
-          cx.notify();
+          changed = true;
         }
+        if (this.collapsed && Date.now() - this.initAt > 1500 && h >= COLLAPSED_PX + 30) {
+          this.collapsed = false;
+          try { localStorage.setItem("sys.collapsed", "0"); } catch {}
+          this.sample(cx);
+          changed = true;
+        }
+        if (changed) cx.notify();
+      })
+      .on_window_mouse_move((e, cx) => {
+        if (!this.drag) return;
+        if (e.pressed_button !== "left") { this.endDrag(); cx.notify(); return; }
+        const z = settings().zoom || 1;
+        const dy = ((e.position?.y ?? 0) - this.drag.startY) / z;
+        const next = pushResize({ heights: this.drag.heights, spacesH: this.drag.spacesH, targetId: OWN_ID, dy });
+        for (const id of STACK) if (next[id] !== this.drag.last[id]) run("layout.resize", { id, px: next[id] });
+        this.drag.last = next;
+      })
+      .on_window_mouse_up("left", (_e, cx) => {
+        if (!this.drag) return;
+        this.endDrag();
+        cx.notify();
       })
       .when(compact, el => el.child(this.renderCompact(t)))
       .when(!compact, el => {
@@ -544,9 +594,13 @@ export default class SystemMonitor extends View {
                     this.collapsed = !this.collapsed;
                     try { localStorage.setItem("sys.collapsed", this.collapsed ? "1" : "0"); } catch {}
                     if (this.collapsed) {
-                      run("layout.resize", { id: "system-monitor", px: 62 });
+                      if (this.blockHeight > COLLAPSED_PX + 24) {
+                        try { localStorage.setItem(EXPANDED_KEY, String(Math.round(this.blockHeight))); } catch {}
+                      }
+                      run("layout.resize", { id: OWN_ID, px: COLLAPSED_PX });
                     } else {
-                      run("layout.resize", { id: "system-monitor", weight: 1 });
+                      const px = Number(localStorage.getItem(EXPANDED_KEY)) || DEFAULT_EXPANDED;
+                      run("layout.resize", { id: OWN_ID, px });
                       this.sample(cx);
                     }
                     cx.notify();
@@ -737,6 +791,19 @@ export default class SystemMonitor extends View {
                 ),
             ),
           );
-      });
+      })
+      .child(
+        div()
+          .id("sysmon-resize-handle")
+          .absolute()
+          .top(0)
+          .left(0)
+          .right(0)
+          .h(6)
+          .cursor_ns_resize()
+          .on_hover((on, cx) => { this.handleHover = on; cx.notify(); })
+          .on_mouse_down("left", (e, cx) => { cx.stop_propagation(); this.startDrag(e); cx.notify(); })
+          .child(div().h(this.drag || this.handleHover ? 2 : 1).w_full().when(Boolean(this.drag || this.handleHover), el => el.bg(t.accent))),
+      );
   }
 }
