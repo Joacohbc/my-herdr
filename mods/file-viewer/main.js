@@ -668,28 +668,69 @@ export default class FileViewer extends View {
     return -1;
   }
 
+  splitQuoted(str, separator) {
+    const out = [];
+    let cur = "";
+    let quote = null;
+    for (let i = 0; i < str.length; i++) {
+      const ch = str[i];
+      if (quote) {
+        if (ch === quote) quote = null;
+        cur += ch;
+        continue;
+      }
+      if (ch === '"' || ch === "'") {
+        quote = ch;
+        cur += ch;
+        continue;
+      }
+      const isSep = separator === "space" ? /\s/.test(ch) : ch === separator;
+      if (isSep) {
+        if (cur) out.push(cur);
+        cur = "";
+      } else {
+        cur += ch;
+      }
+    }
+    if (cur) out.push(cur);
+    return out;
+  }
+
+  stripQuotes(s) {
+    const t = s.trim();
+    if (t.length >= 2 && ((t[0] === '"' && t[t.length - 1] === '"') || (t[0] === "'" && t[t.length - 1] === "'"))) {
+      return t.slice(1, -1);
+    }
+    return t.replace(/^["']|["']$/g, "");
+  }
+
+  formatTokenVal(valStr) {
+    const s = String(valStr ?? "");
+    if (/[\s,"']/.test(s)) return `"${s.replace(/"/g, "'")}"`;
+    return s;
+  }
+
   parseCsvSearchTokens() {
     const raw = (this.csvFilter || "").trim();
     if (!raw) return { colRules: [], textTerms: [] };
     const colRules = [];
     const textTerms = [];
-    const parts = raw.split(/\s+/).filter(Boolean);
+    const parts = this.splitQuoted(raw, "space");
     for (const part of parts) {
       const colon = part.indexOf(":");
-      if (colon > 0) {
+      if (colon > 0 && !part.startsWith('"') && !part.startsWith("'")) {
         const colIdx = this.findCsvColIndex(part.slice(0, colon));
         if (colIdx >= 0) {
-          const vals = part
-            .slice(colon + 1)
-            .split(",")
-            .map(v => v.trim().toLowerCase())
+          const vals = this.splitQuoted(part.slice(colon + 1), ",")
+            .map(v => this.stripQuotes(v).toLowerCase())
             .filter(Boolean);
           if (vals.length > 0) colRules.push({ colIdx, vals });
           continue;
         }
       }
       if (part.startsWith("@")) continue;
-      textTerms.push(part.toLowerCase());
+      const cleanTerm = this.stripQuotes(part).toLowerCase();
+      if (cleanTerm) textTerms.push(cleanTerm);
     }
     return { colRules, textTerms };
   }
@@ -697,10 +738,10 @@ export default class FileViewer extends View {
   getCsvAutocompleteState() {
     const tbl = this.csvTable;
     const raw = this.csvFilter || "";
-    if (!tbl || !raw) return null;
-    const match = /(?:^|\s)(@[^\s]*|[A-Za-z0-9_.-]+:[^\s]*)$/.exec(raw);
-    if (!match) return null;
-    const token = match[1];
+    if (!tbl || !raw || /\s$/.test(raw)) return null;
+    const parts = this.splitQuoted(raw, "space");
+    const token = parts[parts.length - 1];
+    if (!token) return null;
     const tokenStart = raw.length - token.length;
     const prefix = raw.slice(0, tokenStart);
     const colon = token.indexOf(":");
@@ -723,9 +764,11 @@ export default class FileViewer extends View {
     const colIdx = this.findCsvColIndex(colToken);
     if (colIdx < 0) return null;
     const rhs = token.slice(colon + 1);
-    const segs = rhs.split(",");
-    const currentPartial = (segs[segs.length - 1] || "").toLowerCase();
-    const committed = segs.slice(0, -1).map(s => s.trim()).filter(Boolean);
+    const segs = this.splitQuoted(rhs, ",");
+    const trailingComma = rhs.endsWith(",");
+    const currentPartial = trailingComma ? "" : this.stripQuotes(segs[segs.length - 1] || "").toLowerCase();
+    const committedRaw = trailingComma ? segs : segs.slice(0, -1);
+    const committed = committedRaw.map(s => this.stripQuotes(s)).filter(Boolean);
     const selectedLower = new Set(committed.map(s => s.toLowerCase()));
     const allVals = this.uniqueValuesForCol(colIdx);
     const values = allVals
@@ -759,7 +802,8 @@ export default class FileViewer extends View {
     const existingIdx = nextVals.findIndex(v => v.toLowerCase() === lower);
     if (existingIdx >= 0) nextVals.splice(existingIdx, 1);
     else nextVals.push(valStr);
-    const next = `${ac.prefix}${ac.colToken}:${nextVals.join(",")}`;
+    const formatted = nextVals.map(v => this.formatTokenVal(v)).join(",");
+    const next = `${ac.prefix}${ac.colToken}:${formatted}`;
     this.csvFilter = next;
     this.csvFilterInput.set_value(next);
     this.rebuildCsvViewRows();
