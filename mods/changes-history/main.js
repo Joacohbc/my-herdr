@@ -1239,15 +1239,21 @@ export default class ChangesHistory extends View {
       .on_size_change((size) => {
         this.panelHeight = size.height / (settings().zoom || 1);
       })
-      .on_mouse_move((e, cx) => {
+      .on_window_mouse_move((e, cx) => {
         if (!this.draggingSplit) return;
+        if (e.pressed_button !== "left") {
+          this.draggingSplit = null;
+          localStorage.setItem("sc.bottomH", String(this.bottomPaneH));
+          cx.notify();
+          return;
+        }
         const z = settings().zoom || 1;
         const dy = ((e.position?.y ?? 0) - this.draggingSplit.startY) / z;
         const maxH = Math.max(140, this.panelHeight - 220);
         this.bottomPaneH = Math.round(Math.max(80, Math.min(maxH, this.draggingSplit.startH - dy)));
         cx.notify();
       })
-      .on_mouse_up("left", (_e, cx) => {
+      .on_window_mouse_up("left", (_e, cx) => {
         if (!this.draggingSplit) return;
         this.draggingSplit = null;
         localStorage.setItem("sc.bottomH", String(this.bottomPaneH));

@@ -18,6 +18,7 @@ Reglas obligatorias al escribir, modificar o revisar cualquier mod o script de e
 8. **Lectura segura de `props`:** usar `(initialProps && Object.keys(initialProps).length ? initialProps : null) ?? props()`.
 9. **Liberación obligatoria en `close()`:** liberar siempre `EditorState`, `InputState`, cancelar `watchFolder`, borrar archivos temporales en `data/fv-preview/` y vaciar cachés (`releaseIconCache()`).
 10. **Fuente global y nitidez de SVG:** aplicar `.when(Boolean(fontFamily), el => el.font_family(fontFamily))` en la raíz de cada mod con `settings().font_family ?? settings().font`, y renderizar iconos SVG a múltiplos/divisores enteros (`16×16` o `15×15` px).
+11. **Arrastres persistentes (`drag`) y foco por teclado:** todo divisor o resize que pueda salir del área del elemento debe usar `.on_window_mouse_move` + `.on_window_mouse_up("left")` y cancelar el arrastre si `e.pressed_button !== "left"`. Todo mod con `"focusable": true` debe adjuntar `.track_focus(this.handle)` y escuchar `"focus"` en `nextCommand()`.
 
 ---
 

@@ -1,6 +1,6 @@
 import { View, div, image } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState, TextView, Scrollbar, v_virtual_list, Input, InputState } from "gpui-base";
-import { props, readTextFile, theme, settings, shared, setShared, panes, spaces, focused, window, checking } from "herdr";
+import { props, readTextFile, theme, settings, shared, setShared, panes, spaces, focused, window, nextCommand, checking } from "herdr";
 import {
   detectFileKind,
   columnLetter,
@@ -70,6 +70,13 @@ function createEditorState(file, content, softWrap, readOnly = false) {
       type: t.ansi3,
       number: t.ansi1,
       constant: t.ansi6,
+      heading: t.accent,
+      strong: t.foreground,
+      emphasis: t.ansi3,
+      code: t.ansi2,
+      quote: t.muted,
+      list: t.ansi5,
+      link: t.ansi4,
     },
   });
 }
@@ -155,12 +162,22 @@ export default class FileViewer extends View {
     this.solo = Boolean(p?.solo);
     this.tabId = p?.tab ?? null;
     this.paneId = null;
+    this.handle = cx.focus_handle();
 
     if (checking()) return;
     if (p?.file && p?.root) {
       this.openTarget(p, cx);
     }
     cx.timer.every(IDLE_CHECK_MS, cx => this.checkHibernation(cx));
+    cx.spawn(async () => {
+      for (;;) {
+        const cmd = await nextCommand();
+        if (cmd === "focus") {
+          if (this.code) this.code.focus();
+          else this.handle.focus();
+        }
+      }
+    });
   }
 
   close() {
@@ -1896,14 +1913,20 @@ export default class FileViewer extends View {
       .text_color(t.foreground)
       .text_size(13)
       .when(Boolean(fontFamily), el => el.font_family(fontFamily))
-      .on_mouse_move((e, cx) => {
+      .track_focus(this.handle)
+      .on_window_mouse_move((e, cx) => {
         if (!this.resizingCol || !this.csvTable) return;
+        if (e.pressed_button !== "left") {
+          this.resizingCol = null;
+          cx.notify();
+          return;
+        }
         const z = settings().zoom || 1;
         const dx = ((e.position?.x ?? 0) - this.resizingCol.startX) / z;
         this.csvTable.colWidths[this.resizingCol.idx] = Math.round(Math.max(56, Math.min(640, this.resizingCol.startW + dx)));
         cx.notify();
       })
-      .on_mouse_up("left", (_e, cx) => {
+      .on_window_mouse_up("left", (_e, cx) => {
         if (!this.resizingCol) return;
         this.resizingCol = null;
         cx.notify();
