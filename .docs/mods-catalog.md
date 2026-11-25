@@ -64,7 +64,7 @@ Clon personalizado de la barra de pestañas `tabs`.
 ### 1.6 `system-monitor` (`mods/system-monitor/`)
 Monitor en vivo de CPU, RAM y árbol de procesos en la barra lateral izquierda + motor de limpieza automática.
 
-- **Archivos:** `main.js`, `stack-resize.js`, `mod.json`, `icons/*.svg` (Java 32×32, Papirus-Dark, Devicon, Herdr).
+- **Archivos:** `main.js`, `stack-resize.js`, `mod.json`, `icons/*.svg` (Papirus-Dark, Devicon, Herdr), todos con `width`/`height` normalizados a `16` px (ver regla de tamaño intrínseco en `code-conventions.md`).
 - **Responsabilidades:**
   - Muestreo compacto vía `ps` + `awk` (`/proc/stat`, `/proc/meminfo` incluyendo Swap), polling adaptativo (`3 s` activo, `8 s` sin foco, pausado si la ventana no es visible o cuando el panel está minimizado).
   - Colapsable a barra de `62 px` (`System ▸` / `System ▾` vía `layout.resize`) restaurando su última altura expandida en `px`, y manejador superior de *resize por empuje* (**D17**) que conserva el tamaño de los bloques superiores/inferiores desplazándolos contra `spaces` y descolapsa automáticamente al agrandarse.
