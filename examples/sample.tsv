@@ -1,0 +1,6 @@
+Servicio	Estado	RAM_MB	CPU_Pct	Region	Notas
+api-gateway	healthy	142	2.4	sa-east-1	Baja latencia
+auth-service	healthy	98	1.1	sa-east-1	Tokens JWT activos
+billing-worker	degraded	512	18.7	us-east-1	Cola con picos
+search-indexer	healthy	760	9.3	us-east-1	Reindexado OK
+notifications	healthy	64	0.5	sa-east-1	Webhooks estables
