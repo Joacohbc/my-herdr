@@ -186,7 +186,8 @@ export default class PaneCustom extends View {
     const pane = p.pane;
     const isViewer = p.mod === "file-viewer";
     const meta = isViewer ? (shared("file-viewer.meta")?.[pane] ?? null) : null;
-    const name = p.name || ((p.program?.agent || p.program?.shell) && p.program.name) || p.title || p.program?.name || "shell";
+    const baseName = p.name || ((p.program?.agent || p.program?.shell) && p.program.name) || p.title || p.program?.name || "shell";
+    const name = isViewer && meta?.dirty ? `* ${baseName}` : baseName;
     const subtitle = isViewer
       ? (meta?.file ? (meta.line ? `${meta.file}:${meta.line}` : meta.file) : "")
       : folder(p.cwd);

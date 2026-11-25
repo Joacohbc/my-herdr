@@ -1,10 +1,12 @@
 import { View, div, image } from "gpui-kit";
-import { v_flex, h_flex, Editor, EditorState, TextView, Scrollbar, v_virtual_list } from "gpui-base";
+import { v_flex, h_flex, Editor, EditorState, TextView, Scrollbar, v_virtual_list, Input, InputState } from "gpui-base";
 import { props, readTextFile, theme, settings, shared, setShared, panes, spaces, focused, window, checking } from "herdr";
 import {
   detectFileKind,
   columnLetter,
   parseCsvTable,
+  serializeCsvTable,
+  saveTextFile,
   stageImagePreview,
   inspectPdf,
   renderPdfPage,
@@ -98,6 +100,24 @@ export default class FileViewer extends View {
     this.imageSizeBytes = 0;
     this.imageAspect = 1;
     this.csvTable = null;
+    this.csvOriginalText = null;
+    this.csvFilter = "";
+    this.csvSortCol = -1;
+    this.csvSortDir = 0;
+    this.csvSelected = null;
+    this.csvEditedCells = new Set();
+    this.csvDirty = false;
+    this.csvSaving = false;
+    this.csvSaveError = null;
+    this.csvViewRows = [];
+    this.csvFilterInput = InputState.new({ placeholder: "Filter rows (or Col:value)…" });
+    this.csvFilterInput.on("change", (_e, cx) => {
+      this.csvFilter = this.csvFilterInput.value();
+      this.rebuildCsvViewRows();
+      cx.notify();
+    });
+    this.csvCellInput = InputState.new({ placeholder: "Click a cell to edit (Enter to apply)" });
+    this.csvCellInput.on("submit", (_e, cx) => this.applyCellEdit(cx));
     this.pdfPages = 0;
     this.pdfPage = 1;
     this.pdfTitle = "";
@@ -120,6 +140,8 @@ export default class FileViewer extends View {
 
   close() {
     this.releaseBuffers();
+    this.csvFilterInput?.release();
+    this.csvCellInput?.release();
     if (this.paneId) {
       const all = { ...(shared("file-viewer.meta") ?? {}) };
       delete all[this.paneId];
@@ -134,6 +156,12 @@ export default class FileViewer extends View {
     this.lineStarts = null;
     this.textLen = 0;
     this.csvTable = null;
+    this.csvOriginalText = null;
+    this.csvViewRows = [];
+    this.csvSelected = null;
+    this.csvEditedCells = new Set();
+    this.csvDirty = false;
+    this.csvSaveError = null;
     if (this.imageRelPath) {
       const old = this.imageRelPath;
       this.imageRelPath = null;
@@ -193,7 +221,7 @@ export default class FileViewer extends View {
   }
 
   hibernate(cx) {
-    if (this.hibernated || !this.hasLoadedContent()) return;
+    if (this.hibernated || this.csvDirty || !this.hasLoadedContent()) return;
     this.loadSeq++;
     this.releaseBuffers();
     this.loading = false;
@@ -250,6 +278,7 @@ export default class FileViewer extends View {
       preview: hasPreview ? this.previewMode : (this.kind === "image" || this.kind === "pdf"),
       wrap: this.softWrap,
       zoomPct,
+      dirty: Boolean(this.csvDirty),
     };
     const all = shared("file-viewer.meta") ?? {};
     const prev = all[paneId];
@@ -260,7 +289,8 @@ export default class FileViewer extends View {
       prev.hasPreview === next.hasPreview &&
       prev.preview === next.preview &&
       prev.wrap === next.wrap &&
-      prev.zoomPct === next.zoomPct
+      prev.zoomPct === next.zoomPct &&
+      Boolean(prev.dirty) === next.dirty
     ) {
       return;
     }
@@ -460,7 +490,18 @@ export default class FileViewer extends View {
 
         if (kind === "csv") {
           this.rawText = content;
+          this.csvOriginalText = text;
           this.csvTable = parseCsvTable(content, this.file.toLowerCase().endsWith(".tsv"));
+          this.csvFilter = "";
+          this.csvFilterInput?.set_value("");
+          this.csvCellInput?.set_value("");
+          this.csvSortCol = -1;
+          this.csvSortDir = 0;
+          this.csvSelected = null;
+          this.csvEditedCells = new Set();
+          this.csvDirty = false;
+          this.csvSaveError = null;
+          this.rebuildCsvViewRows();
           this.code = null;
         } else if (kind === "markdown" && this.previewMode) {
           this.rawText = content;
@@ -586,16 +627,175 @@ export default class FileViewer extends View {
       );
   }
 
+  rebuildCsvViewRows() {
+    const tbl = this.csvTable;
+    if (!tbl) {
+      this.csvViewRows = [];
+      return;
+    }
+    const rawFilter = (this.csvFilter || "").trim().toLowerCase();
+    let colFilterIdx = -1;
+    let needle = rawFilter;
+    const colon = rawFilter.indexOf(":");
+    if (colon > 0) {
+      const prefix = rawFilter.slice(0, colon).trim();
+      const rhs = rawFilter.slice(colon + 1).trim();
+      for (let c = 0; c < tbl.colCount; c++) {
+        if (columnLetter(c).toLowerCase() === prefix || (tbl.headers[c] || "").toLowerCase() === prefix) {
+          colFilterIdx = c;
+          needle = rhs;
+          break;
+        }
+      }
+    }
+
+    const items = [];
+    for (let i = 0; i < tbl.dataRows.length; i++) {
+      const row = tbl.dataRows[i];
+      if (needle) {
+        if (colFilterIdx >= 0) {
+          if (!String(row[colFilterIdx] ?? "").toLowerCase().includes(needle)) continue;
+        } else {
+          let matched = false;
+          for (let c = 0; c < tbl.colCount; c++) {
+            if (String(row[c] ?? "").toLowerCase().includes(needle)) {
+              matched = true;
+              break;
+            }
+          }
+          if (!matched) continue;
+        }
+      }
+      items.push({ origIdx: i, row });
+    }
+
+    if (this.csvSortCol >= 0 && this.csvSortDir !== 0) {
+      const col = this.csvSortCol;
+      const dir = this.csvSortDir;
+      items.sort((a, b) => {
+        const av = String(a.row[col] ?? "").trim();
+        const bv = String(b.row[col] ?? "").trim();
+        const an = av !== "" ? Number(av) : NaN;
+        const bn = bv !== "" ? Number(bv) : NaN;
+        if (Number.isFinite(an) && Number.isFinite(bn)) {
+          return (an - bn) * dir || a.origIdx - b.origIdx;
+        }
+        return av.localeCompare(bv, undefined, { numeric: true, sensitivity: "base" }) * dir || a.origIdx - b.origIdx;
+      });
+    }
+
+    this.csvViewRows = items;
+  }
+
+  toggleCsvSort(colIdx, cx) {
+    if (this.csvSortCol !== colIdx) {
+      this.csvSortCol = colIdx;
+      this.csvSortDir = 1;
+    } else if (this.csvSortDir === 1) {
+      this.csvSortDir = -1;
+    } else {
+      this.csvSortCol = -1;
+      this.csvSortDir = 0;
+    }
+    this.rebuildCsvViewRows();
+    cx.notify();
+  }
+
+  selectCsvCell(origRowIdx, colIdx, cx) {
+    if (!this.csvTable) return;
+    this.csvSelected = { row: origRowIdx, col: colIdx };
+    const val = this.csvTable.dataRows[origRowIdx]?.[colIdx] ?? "";
+    this.csvCellInput.set_value(String(val));
+    this.csvSaveError = null;
+    cx.notify();
+  }
+
+  applyCellEdit(cx) {
+    if (!this.csvTable || !this.csvSelected) return;
+    const { row, col } = this.csvSelected;
+    const targetRow = this.csvTable.dataRows[row];
+    if (!targetRow) return;
+    const nextVal = this.csvCellInput.value();
+    const prevVal = String(targetRow[col] ?? "");
+    if (nextVal === prevVal) return;
+    while (targetRow.length <= col) targetRow.push("");
+    targetRow[col] = nextVal;
+    this.csvEditedCells.add(`${row}:${col}`);
+    this.csvDirty = true;
+    this.csvSaveError = null;
+    this.rawText = serializeCsvTable(this.csvTable);
+    this.rebuildCsvViewRows();
+    this.publishMeta();
+    cx.notify();
+  }
+
+  discardCsvEdits(cx) {
+    if (!this.csvOriginalText || !this.file) return;
+    const content = this.csvOriginalText.length > MAX_FILE_CHARS
+      ? this.csvOriginalText.slice(0, MAX_FILE_CHARS) + "\n… (file truncated at 250 KB to save RAM)"
+      : this.csvOriginalText;
+    this.rawText = content;
+    this.csvTable = parseCsvTable(content, this.file.toLowerCase().endsWith(".tsv"));
+    this.csvEditedCells = new Set();
+    this.csvDirty = false;
+    this.csvSaveError = null;
+    if (this.csvSelected) {
+      const { row, col } = this.csvSelected;
+      this.csvCellInput.set_value(String(this.csvTable.dataRows[row]?.[col] ?? ""));
+    }
+    this.rebuildCsvViewRows();
+    this.publishMeta();
+    cx.notify();
+  }
+
+  saveCsvEdits(cx) {
+    if (!this.csvTable || !this.csvDirty || this.csvSaving || !this.file || !this.root) return;
+    if (this.csvTable.truncated) {
+      this.csvSaveError = "Cannot overwrite truncated CSV (>5,000 rows)";
+      cx.notify();
+      return;
+    }
+    const serialized = serializeCsvTable(this.csvTable);
+    const fullPath = `${this.root}/${this.file}`;
+    const on = this.on;
+    const expected = this.csvOriginalText;
+    this.csvSaving = true;
+    this.csvSaveError = null;
+    cx.notify();
+
+    cx.spawn(async cx => {
+      try {
+        await saveTextFile(fullPath, on, serialized, expected);
+        this.csvOriginalText = serialized;
+        this.rawText = serialized;
+        this.csvEditedCells = new Set();
+        this.csvDirty = false;
+        this.csvSaveError = null;
+      } catch (e) {
+        this.csvSaveError = String(e?.message || e || "Save failed");
+      } finally {
+        this.csvSaving = false;
+        this.publishMeta();
+        cx.notify();
+      }
+    });
+  }
+
   renderCsvBody(t, fontSize) {
     const tbl = this.csvTable;
+    const viewRows = this.csvViewRows;
     const rowH = Math.ceil(fontSize * 1.9);
     const gutterW = 46;
     const totalW = gutterW + tbl.colWidths.reduce((s, w) => s + w, 0) + 16;
+    const cellRef = this.csvSelected ? `${columnLetter(this.csvSelected.col)}${this.csvSelected.row + 1}` : "—";
 
     const headerCells = [
       div().w(gutterW).h_full().flex_none().px(6).flex().items_center().justify_end().border_r(1).border_color(t.border).text_size(10.5).text_color(t.dim).child("#"),
-      ...tbl.colWidths.map((w, idx) =>
-        h_flex()
+      ...tbl.colWidths.map((w, idx) => {
+        const isSorted = this.csvSortCol === idx && this.csvSortDir !== 0;
+        const sortGlyph = !isSorted ? "" : this.csvSortDir === 1 ? "▲" : "▼";
+        return h_flex()
+          .id(`fv-csv-hdr-${idx}`)
           .w(w)
           .h_full()
           .flex_none()
@@ -604,19 +804,25 @@ export default class FileViewer extends View {
           .items_center()
           .border_r(1)
           .border_color(t.border)
+          .cursor_pointer()
+          .when(isSorted, el => el.bg(t.selected))
+          .hover(s => s.bg(isSorted ? t.selected : t.hover))
+          .tooltip(`Click to sort by ${columnLetter(idx)} (${tbl.headers[idx] || ""})`)
+          .on_click((_e, cx) => this.toggleCsvSort(idx, cx))
           .child(div().text_size(9.5).font_semibold().text_color(t.accent).child(columnLetter(idx)))
-          .child(div().flex_1().min_w(0).truncate().text_size(Math.max(10, fontSize - 1.5)).font_semibold().text_color(t.foreground).child(tbl.headers[idx] ?? "")),
-      ),
+          .child(div().flex_1().min_w(0).truncate().text_size(Math.max(10, fontSize - 1.5)).font_semibold().text_color(t.foreground).child(tbl.headers[idx] ?? ""))
+          .when(Boolean(sortGlyph), el => el.child(div().text_size(9.5).font_bold().text_color(t.accent).child(sortGlyph)));
+      }),
     ];
 
-    const renderDataRow = (row, rowIdx) =>
+    const renderDataRow = (item, visIdx) =>
       h_flex()
         .w_full()
         .h(rowH)
         .flex_none()
         .border_b(1)
         .border_color(t.border)
-        .when(rowIdx % 2 === 1, el => el.bg(t.surface + "66"))
+        .when(visIdx % 2 === 1, el => el.bg(t.surface + "66"))
         .child(
           div()
             .w(gutterW)
@@ -631,21 +837,29 @@ export default class FileViewer extends View {
             .border_color(t.border)
             .text_size(10.5)
             .text_color(t.dim)
-            .child(String(rowIdx + 1)),
+            .child(String(item.origIdx + 1)),
         )
         .children(
-          tbl.colWidths.map((w, c) =>
-            div()
+          tbl.colWidths.map((w, c) => {
+            const isSel = this.csvSelected?.row === item.origIdx && this.csvSelected?.col === c;
+            const isEdited = this.csvEditedCells.has(`${item.origIdx}:${c}`);
+            return div()
+              .id(`fv-csv-c-${item.origIdx}-${c}`)
               .w(w)
               .h_full()
               .flex_none()
               .px(8)
               .flex()
               .items_center()
+              .cursor_pointer()
               .border_r(1)
-              .border_color(t.border)
-              .child(div().w_full().truncate().text_size(Math.max(10, fontSize - 1)).text_color(t.foreground).child(row[c] ?? "")),
-          ),
+              .border_color(isSel ? t.accent : t.border)
+              .when(isSel, el => el.bg(t.selected))
+              .when(!isSel && isEdited, el => el.bg(t.blocked + "22"))
+              .hover(s => s.bg(isSel ? t.selected : t.hover))
+              .on_click((_e, cx) => this.selectCsvCell(item.origIdx, c, cx))
+              .child(div().w_full().truncate().text_size(Math.max(10, fontSize - 1)).text_color(isEdited ? t.blocked : t.foreground).child(item.row[c] ?? ""));
+          }),
         );
 
     return v_flex()
@@ -653,18 +867,155 @@ export default class FileViewer extends View {
       .min_h(0)
       .child(
         h_flex()
-          .h(26)
+          .h(32)
           .flex_none()
-          .px(12)
+          .px(10)
           .gap(8)
           .items_center()
           .bg(t.surface)
           .border_b(1)
           .border_color(t.border)
-          .text_size(11)
-          .text_color(t.dim)
-          .child(`${tbl.dataRows.length}${tbl.truncated ? "+" : ""} rows × ${tbl.colCount} cols`)
-          .child(`· delim "${tbl.delimiter === "\t" ? "TAB" : tbl.delimiter}"`),
+          .child(
+            h_flex()
+              .w(210)
+              .h(24)
+              .px(7)
+              .gap(4)
+              .items_center()
+              .rounded(5)
+              .bg(t.background)
+              .border_1()
+              .border_color(t.border)
+              .child(Input.new(this.csvFilterInput).flex_1().h_full().text_size(11.5).text_color(t.foreground))
+              .when(Boolean(this.csvFilter), el =>
+                el.child(
+                  div()
+                    .id("fv-csv-filter-clear")
+                    .px(3)
+                    .rounded(4)
+                    .text_size(11)
+                    .text_color(t.dim)
+                    .cursor_pointer()
+                    .hover(s => s.bg(t.hover).text_color(t.foreground))
+                    .on_click((_e, cx) => {
+                      this.csvFilter = "";
+                      this.csvFilterInput.set_value("");
+                      this.rebuildCsvViewRows();
+                      cx.notify();
+                    })
+                    .child("×"),
+                ),
+              ),
+          )
+          .child(
+            div()
+              .text_size(11)
+              .text_color(t.dim)
+              .child(
+                this.csvFilter
+                  ? `${viewRows.length} / ${tbl.dataRows.length} rows`
+                  : `${tbl.dataRows.length}${tbl.truncated ? "+" : ""} rows × ${tbl.colCount} cols`,
+              ),
+          )
+          .child(div().flex_1())
+          .when(this.csvDirty, el =>
+            el
+              .child(
+                div()
+                  .px(6)
+                  .py(1)
+                  .rounded(4)
+                  .bg(t.blocked + "26")
+                  .text_size(11)
+                  .font_semibold()
+                  .text_color(t.blocked)
+                  .child(`* ${this.csvEditedCells.size} edit${this.csvEditedCells.size === 1 ? "" : "s"}`),
+              )
+              .child(
+                div()
+                  .id("fv-csv-discard")
+                  .px(7)
+                  .py(2)
+                  .rounded(5)
+                  .bg(t.raised)
+                  .text_size(11)
+                  .text_color(t.muted)
+                  .cursor_pointer()
+                  .hover(s => s.bg(t.hover).text_color(t.foreground))
+                  .on_click((_e, cx) => this.discardCsvEdits(cx))
+                  .child("↺ Discard"),
+              )
+              .child(
+                div()
+                  .id("fv-csv-save")
+                  .px(8)
+                  .py(2)
+                  .rounded(5)
+                  .bg(t.solid)
+                  .text_size(11)
+                  .font_semibold()
+                  .text_color(t.solid_foreground)
+                  .cursor_pointer()
+                  .on_click((_e, cx) => this.saveCsvEdits(cx))
+                  .child(this.csvSaving ? "Saving…" : "✓ Save"),
+              ),
+          ),
+      )
+      .child(
+        h_flex()
+          .h(30)
+          .flex_none()
+          .px(10)
+          .gap(6)
+          .items_center()
+          .bg(t.background)
+          .border_b(1)
+          .border_color(t.border)
+          .child(
+            div()
+              .min_w(36)
+              .px(6)
+              .py(1)
+              .rounded(4)
+              .bg(t.surface)
+              .text_center()
+              .text_size(11)
+              .font_semibold()
+              .text_color(this.csvSelected ? t.accent : t.dim)
+              .child(cellRef),
+          )
+          .child(
+            h_flex()
+              .flex_1()
+              .h(23)
+              .px(7)
+              .items_center()
+              .rounded(5)
+              .bg(t.surface)
+              .border_1()
+              .border_color(this.csvSelected ? t.accent : t.border)
+              .child(Input.new(this.csvCellInput).flex_1().h_full().text_size(11.5).text_color(t.foreground)),
+          )
+          .when(Boolean(this.csvSelected), el =>
+            el.child(
+              div()
+                .id("fv-csv-apply")
+                .px(7)
+                .py(2)
+                .rounded(5)
+                .bg(t.raised)
+                .text_size(11)
+                .font_semibold()
+                .text_color(t.foreground)
+                .cursor_pointer()
+                .hover(s => s.bg(t.hover))
+                .on_click((_e, cx) => this.applyCellEdit(cx))
+                .child("Apply"),
+            ),
+          )
+          .when(Boolean(this.csvSaveError), el =>
+            el.child(div().text_size(11).text_color(t.ansi1).child(this.csvSaveError)),
+          ),
       )
       .child(
         div()
@@ -696,10 +1047,10 @@ export default class FileViewer extends View {
                       .child(
                         v_virtual_list(
                           "fv-csv-rows",
-                          tbl.dataRows.length,
+                          viewRows.length,
                           rowH,
-                          (i) => String(i),
-                          (range) => tbl.dataRows.slice(range.start, range.end).map((r, offset) => renderDataRow(r, range.start + offset)),
+                          (i) => String(viewRows[i]?.origIdx ?? i),
+                          (range) => viewRows.slice(range.start, range.end).map((item, offset) => renderDataRow(item, range.start + offset)),
                         ).size_full(),
                       ),
                   ),

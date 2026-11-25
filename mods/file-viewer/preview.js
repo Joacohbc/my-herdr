@@ -119,6 +119,41 @@ export function parseCsvTable(text, isTsv = false) {
   return { headers, dataRows, colCount, colWidths, truncated, delimiter: delim };
 }
 
+function escapeCsvCell(value, delim) {
+  const s = value == null ? "" : String(value);
+  if (s.includes(delim) || s.includes('"') || s.includes("\n") || s.includes("\r")) {
+    return `"${s.replace(/"/g, '""')}"`;
+  }
+  return s;
+}
+
+export function serializeCsvTable(table) {
+  const delim = table.delimiter || ",";
+  const allRows = [table.headers, ...table.dataRows];
+  return allRows
+    .map(row => {
+      const cells = [];
+      for (let c = 0; c < table.colCount; c++) {
+        cells.push(escapeCsvCell(row[c] ?? "", delim));
+      }
+      return cells.join(delim);
+    })
+    .join("\n") + "\n";
+}
+
+export async function saveTextFile(fullPath, on, content, expectedOriginal) {
+  if (!on) {
+    await writeTextFile(fullPath, content, expectedOriginal);
+    return;
+  }
+  const r = await exec(
+    "sh",
+    ["-c", 'printf "%s" "$2" > "$1"', "_", fullPath, content],
+    { on, timeout: 8000 },
+  );
+  if (r.code !== 0) throw new Error(r.stderr || "Cannot save remote file");
+}
+
 export function previewDir() {
   return `${appHome()}/data/fv-preview`;
 }
