@@ -332,29 +332,31 @@ export default class FileViewer extends View {
       this.code = null;
       return;
     }
-    if (this.rawText !== null) {
-      this.code = createReadonlyEditor(this.file, this.rawText, this.softWrap);
-      if (this.highlightRange) this.code.set_selected_range(this.highlightRange);
-      return;
-    }
-    if (this.kind === "svg" && this.file && this.root) {
-      const seq = ++this.loadSeq;
-      const fullPath = `${this.root}/${this.file}`;
-      const on = this.on;
-      cx.spawn(async cx => {
-        try {
+    const seq = ++this.loadSeq;
+    const file = this.file;
+    const fullPath = `${this.root}/${this.file}`;
+    const on = this.on;
+    const existingRaw = this.rawText;
+    const isSvg = this.kind === "svg";
+    cx.spawn(async cx => {
+      try {
+        let content = existingRaw;
+        if (content === null && isSvg && file && this.root) {
           const text = await readTextFile(fullPath, { on });
           if (this.loadSeq !== seq || text === null) return;
-          const content = text.length > MAX_FILE_CHARS ? text.slice(0, MAX_FILE_CHARS) + "\n… (truncated)" : text;
+          content = text.length > MAX_FILE_CHARS ? text.slice(0, MAX_FILE_CHARS) + "\n… (truncated)" : text;
           this.rawText = content;
-          if (!this.previewMode) this.code = createReadonlyEditor(this.file, content, this.softWrap);
-        } catch {
-          // ignore
-        } finally {
-          if (this.loadSeq === seq) cx.notify();
         }
-      });
-    }
+        if (this.loadSeq !== seq || this.previewMode || content === null) return;
+        this.code?.release();
+        this.code = createReadonlyEditor(file, content, this.softWrap);
+        if (this.highlightRange) this.code.set_selected_range(this.highlightRange);
+      } catch {
+        // ignore
+      } finally {
+        if (this.loadSeq === seq) cx.notify();
+      }
+    });
   }
 
   checkCommands(cx, fromRender = false) {

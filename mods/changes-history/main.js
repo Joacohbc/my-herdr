@@ -170,6 +170,7 @@ export default class ChangesHistory extends View {
     this.secStashes = false;
     this.secGraph = false;
     this.hoveredRow = null;
+    this.pendingConfirm = null;
     const savedH = Number(localStorage.getItem("sc.bottomH"));
     this.bottomPaneH = Number.isFinite(savedH) && savedH >= 80 && savedH <= 700 ? savedH : 240;
     this.draggingSplit = null;
@@ -567,6 +568,27 @@ export default class ChangesHistory extends View {
   unstageFile(path, cx) { this.runGitAction(["reset", "HEAD", "--", path], cx); }
   stageAll(cx) { this.runGitAction(["add", "-A"], cx); }
   unstageAll(cx) { this.runGitAction(["reset", "HEAD"], cx); }
+
+  requestDiscardFile(file, cx) {
+    this.pendingConfirm = { kind: "discard", file };
+    cx.notify();
+  }
+
+  requestDropStash(stash, cx) {
+    this.pendingConfirm = { kind: "drop-stash", stash };
+    cx.notify();
+  }
+
+  confirmPendingAction(cx) {
+    const req = this.pendingConfirm;
+    if (!req) return;
+    this.pendingConfirm = null;
+    if (req.kind === "discard") {
+      this.discardFile(req.file, cx);
+    } else if (req.kind === "drop-stash") {
+      this.stashDrop(req.stash.ref, cx);
+    }
+  }
 
   discardFile(file, cx) {
     if (file.untracked) {
@@ -1004,7 +1026,7 @@ export default class ChangesHistory extends View {
         el
           .child(this.actionBtn(t, `${rowId}-open`, "↗", "Open file (Ctrl+Click: new tab)", (e) => this.openInViewer(file.path, e)))
           .when(!file.staged, r => r
-            .child(this.actionBtn(t, `${rowId}-disc`, "↺", file.untracked ? "Delete untracked file" : "Discard changes", (_e, cx) => this.discardFile(file, cx)))
+            .child(this.actionBtn(t, `${rowId}-disc`, "↺", file.untracked ? "Delete untracked file" : "Discard changes", (_e, cx) => this.requestDiscardFile(file, cx)))
             .child(this.actionBtn(t, `${rowId}-add`, "+", "Stage changes", (_e, cx) => this.stageFile(file.path, cx))))
           .when(file.staged, r => r
             .child(this.actionBtn(t, `${rowId}-un`, "−", "Unstage changes", (_e, cx) => this.unstageFile(file.path, cx)))),
@@ -1232,6 +1254,12 @@ export default class ChangesHistory extends View {
         cx.notify();
       })
       .on_key_down((e, cx) => {
+        if (e.key === "escape" && this.pendingConfirm) {
+          this.pendingConfirm = null;
+          cx.stop_propagation();
+          cx.notify();
+          return;
+        }
         if (e.key === "escape" && this.typing) {
           this.typing = false;
           this.handle.focus();
@@ -1311,6 +1339,61 @@ export default class ChangesHistory extends View {
                 ),
             ),
           )
+          .when(Boolean(this.pendingConfirm), el => {
+            const req = this.pendingConfirm;
+            const isDelete = req.kind === "discard" && req.file?.untracked;
+            const label = req.kind === "discard"
+              ? (isDelete ? `Delete "${req.file.path}"?` : `Discard changes in "${req.file.path}"?`)
+              : `Drop stash "${req.stash.ref}"?`;
+            const confirmText = isDelete ? "Delete" : req.kind === "discard" ? "Discard" : "Drop";
+            return el.child(
+              v_flex()
+                .flex_none()
+                .px(10)
+                .py(7)
+                .gap(6)
+                .bg(t.ansi1 + "1a")
+                .border_b(1)
+                .border_color(t.ansi1)
+                .child(div().text_size(11.5).font_medium().text_color(t.foreground).child(label))
+                .child(
+                  h_flex()
+                    .gap(6)
+                    .justify_end()
+                    .child(
+                      div()
+                        .id("sc-confirm-cancel")
+                        .px(8)
+                        .py(3)
+                        .rounded(5)
+                        .bg(t.raised)
+                        .text_size(11)
+                        .text_color(t.foreground)
+                        .cursor_pointer()
+                        .hover(s => s.bg(t.hover))
+                        .on_click((_e, cx) => {
+                          this.pendingConfirm = null;
+                          cx.notify();
+                        })
+                        .child("Cancel"),
+                    )
+                    .child(
+                      div()
+                        .id("sc-confirm-ok")
+                        .px(8)
+                        .py(3)
+                        .rounded(5)
+                        .bg(t.ansi1)
+                        .text_size(11)
+                        .font_semibold()
+                        .text_color("#ffffff")
+                        .cursor_pointer()
+                        .on_click((_e, cx) => this.confirmPendingAction(cx))
+                        .child(confirmText),
+                    ),
+                ),
+            );
+          })
           .when(Boolean(this.note), el =>
             el.child(
               h_flex()
@@ -1426,7 +1509,7 @@ export default class ChangesHistory extends View {
                               .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.foreground).child(st.message))
                               .child(this.actionBtn(t, `st-apply-${st.ref}`, "Apply", "Apply stash (keep in list)", (_e, cx) => this.stashApply(st.ref, cx)))
                               .child(this.actionBtn(t, `st-pop-${st.ref}`, "Pop", "Pop stash (apply & remove)", (_e, cx) => this.stashPop(st.ref, cx)))
-                              .child(this.actionBtn(t, `st-drop-${st.ref}`, "×", "Drop stash", (_e, cx) => this.stashDrop(st.ref, cx))),
+                              .child(this.actionBtn(t, `st-drop-${st.ref}`, "×", "Drop stash", (_e, cx) => this.requestDropStash(st, cx))),
                           ),
                         ),
                     ),
