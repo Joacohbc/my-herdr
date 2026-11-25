@@ -404,11 +404,14 @@ export default class FilesSearch extends View {
     };
 
     if (openInNewTab) {
-      run("tab.new", {
+      const res = run("tab.new", {
         name: fileName,
         mod: "file-viewer",
         props: { ...payload, tab: null, solo: true },
       });
+      if (res?.pane) {
+        run("pane.rename", { pane: res.pane, name: fileName });
+      }
       return;
     }
 

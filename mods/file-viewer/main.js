@@ -49,7 +49,7 @@ export default class FileViewer extends View {
     this.lastSharedSeq = shared("file-viewer.open")?.seq ?? 0;
     this.lastCmdSeq = shared("file-viewer.cmd")?.seq ?? 0;
     this.solo = Boolean(initialProps?.solo);
-    this.tabId = initialProps?.tab ?? focused()?.tab ?? null;
+    this.tabId = initialProps?.tab ?? null;
     this.paneId = null;
 
     if (checking()) return;
@@ -70,15 +70,28 @@ export default class FileViewer extends View {
   }
 
   resolvePaneId() {
-    const list = panes().filter(p => p.mod === "file-viewer" && (!this.tabId || p.tab === this.tabId));
-    if (this.paneId && list.some(p => p.pane === this.paneId)) return this.paneId;
-    const focusedMatch = list.find(p => p.focused);
+    const allViewers = panes().filter(p => p.mod === "file-viewer");
+    if (this.paneId && allViewers.some(p => p.pane === this.paneId)) return this.paneId;
+
+    const scoped = this.tabId ? allViewers.filter(p => p.tab === this.tabId) : allViewers;
+    const focusedMatch = scoped.find(p => p.focused) ?? allViewers.find(p => p.focused);
     if (focusedMatch) {
       this.paneId = focusedMatch.pane;
+      this.tabId = focusedMatch.tab;
       return this.paneId;
     }
-    if (list.length === 1) {
-      this.paneId = list[0].pane;
+
+    const activeTab = focused()?.tab;
+    const inActiveTab = activeTab ? allViewers.filter(p => p.tab === activeTab) : [];
+    if (inActiveTab.length === 1) {
+      this.paneId = inActiveTab[0].pane;
+      this.tabId = inActiveTab[0].tab;
+      return this.paneId;
+    }
+
+    if (scoped.length === 1) {
+      this.paneId = scoped[0].pane;
+      this.tabId = scoped[0].tab;
       return this.paneId;
     }
     return this.paneId;
