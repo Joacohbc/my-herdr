@@ -3,7 +3,7 @@
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, openOverlay, closeOverlay, props, window, layout, settings, checking } from "herdr";
-import { STACK, BRAND_PX, snapshotHeights, pushResize } from "./stack-resize.js";
+import { STACK, BRAND_PX, snapshotHeights, pushResize, fitStackToViewport } from "./stack-resize.js";
 
 const OWN_ID = "agents";
 const COLLAPSED_PX = 64;
@@ -462,7 +462,7 @@ export default class Agents extends View {
         run("layout.resize", { id: OWN_ID, px: COLLAPSED_PX });
       } else {
         const px = Number(localStorage.getItem(EXPANDED_KEY)) || DEFAULT_EXPANDED;
-        run("layout.resize", { id: OWN_ID, px });
+        fitStackToViewport(OWN_ID, px);
       }
       cx.notify();
     };
