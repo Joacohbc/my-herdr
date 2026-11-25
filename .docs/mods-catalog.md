@@ -39,9 +39,9 @@ Panel de Source Control estilo VS Code compatible con repositorios locales y SSH
 
 - **Archivos:** `main.js`, `github.js`, `material-icons.js` (solo iconos de archivo, sin tabla de carpetas), `changes.svg`, `mod.json`.
 - **Funcionalidades:**
-  - Caja superior de commit + botón `✓ Commit` + acciones rápidas (`S+` Stash, `↓` Pull, `↑` Push, `↻` Refresh).
+  - Caja superior de commit + botón `✓ Commit` + acciones rápidas (`S+` Stash, `↓` Pull, `↑` Push, `↻` Refresh) y enlace directo `↗` en la píldora de rama cuando existe rama remota rastreada (`@{u}` o `origin/<rama>`).
   - Panel superior scrolleable (`Staged Changes` y `Changes`) separado por un **divisor horizontal resizable** (`localStorage["sc.bottomH"]`) del panel inferior (`Stashes`, `Graph` y `Pull Requests`).
-  - **`Graph`:** muestra la fecha (`YYYY-MM-DD`) junto al hash corto en cada commit, incluye buscador por mensaje (`git log --fixed-strings --regexp-ignore-case --grep=...` con debounce de `220 ms`) y selector desplegable de rama (`Current`, `All branches`, locales y remotas hasta `150` ramas).
+  - **`Graph`:** muestra la fecha (`YYYY-MM-DD`) junto al hash corto en cada commit, incluye buscador por mensaje (`git log --fixed-strings --regexp-ignore-case --grep=...` con debounce de `220 ms`), selector desplegable de rama (`Current`, `All branches`, locales y remotas hasta `150` ramas) y paginación por fecha (`--before=<epoch>`, límite explícito de `1000` commits por página con navegación `← Newer` / `Latest` / `Older commits →`).
   - **`Pull Requests` (`github.js`):** integración bajo demanda con GitHub mediante `gh` CLI en el repositorio actual (local y SSH) con buscador (`280 ms` debounce), filtro por estado (`Open`, `Merged`, `Closed`, `All`), apertura directa en navegador (`↗` vía `cx.open_url`), vista de detalle con archivos/diff virtualizado y `Checkout` (`gh pr checkout`).
   - `Ctrl + clic` en archivos de `Changes` / `Staged Changes`, commits de `Graph` o PRs de `Pull Requests` abre la vista de diff virtualizado dedicada en una nueva pestaña (con hibernación automática en segundo plano tras `45 s`).
   - Confirmación obligatoria en rojo (cancelable con `Esc`) antes de `Discard`, `Delete untracked file` o `Drop stash`.

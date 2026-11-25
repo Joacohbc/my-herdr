@@ -13,6 +13,41 @@ export function formatIsoDate(iso) {
   return m ? m[1] : "";
 }
 
+export function buildRemoteBranchUrl(remoteUrl, branchName) {
+  const raw = String(remoteUrl || "").trim();
+  const branch = String(branchName || "").trim();
+  if (!raw || !branch || branch === "HEAD") return null;
+
+  let host = "";
+  let repoPath = "";
+  const scpMatch = /^(?:[^@]+@)?([^:\/]+):(.+)$/.exec(raw);
+  const urlMatch = /^(?:https?|ssh):\/\/(?:[^@\/]+@)?([^\/]+)\/(.+)$/.exec(raw);
+
+  if (urlMatch) {
+    host = urlMatch[1];
+    repoPath = urlMatch[2];
+  } else if (scpMatch) {
+    host = scpMatch[1];
+    repoPath = scpMatch[2];
+  } else {
+    return null;
+  }
+
+  repoPath = repoPath.replace(/\.git$/i, "").replace(/\/+$/, "");
+  if (!host || !repoPath) return null;
+
+  const baseUrl = `https://${host}/${repoPath}`;
+  const encodedBranch = branch.split("/").map(encodeURIComponent).join("/");
+  const lowerHost = host.toLowerCase();
+  if (lowerHost.includes("bitbucket.org")) {
+    return `${baseUrl}/src/${encodedBranch}`;
+  }
+  if (lowerHost.includes("gitlab")) {
+    return `${baseUrl}/-/tree/${encodedBranch}`;
+  }
+  return `${baseUrl}/tree/${encodedBranch}`;
+}
+
 function classifyGhError(raw) {
   const text = String(raw || "").trim();
   const lower = text.toLowerCase();

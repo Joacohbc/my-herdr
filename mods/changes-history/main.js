@@ -2,13 +2,14 @@ import { View, div, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar, v_virtual_list } from "gpui-base";
 import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, window, layout, checking, run, shared, setShared, props } from "herdr";
 import { fileIcon, releaseIconCache } from "./material-icons.js";
-import { listPullRequests, loadPullRequestDetail, checkoutPullRequest } from "./github.js";
+import { listPullRequests, loadPullRequestDetail, checkoutPullRequest, buildRemoteBranchUrl } from "./github.js";
 
 const scans = globalThis[Symbol.for("herdr.changesStatus.v3")] ??= new Map();
 const MAX_SCANS = 4;
 const MAX_DIFF_LINES = 1000;
 const MAX_DIFF_LINE_CHARS = 2000;
 const MAX_HISTORY_LIMIT = 1000;
+const MAX_HISTORY_PAGES = 20;
 const MAX_BRANCHES = 150;
 const GRAPH_SEARCH_DEBOUNCE_MS = 220;
 const PR_SEARCH_DEBOUNCE_MS = 280;
@@ -174,6 +175,7 @@ export default class ChangesHistory extends View {
     this.standalone = this.standaloneCommit || this.standaloneFileDiff || this.standalonePr;
     this.standaloneFile = this.standaloneFileDiff ? p.fileDiff : null;
     this.branch = "";
+    this.remoteBranchUrl = null;
     this.staged = [];
     this.unstaged = [];
     this.stashes = [];
@@ -202,6 +204,8 @@ export default class ChangesHistory extends View {
     this.historyError = null;
     this.historyLoadedFor = null;
     this.historySeq = 0;
+    this.historyBefore = null;
+    this.historyBeforeStack = [];
     this.graphQuery = "";
     this.graphBranchRef = "";
     this.graphBranchLabel = "";
@@ -365,6 +369,8 @@ export default class ChangesHistory extends View {
     this.commits = [];
     this.historyLimit = 50;
     this.historyLoadedFor = null;
+    this.historyBefore = null;
+    this.historyBeforeStack = [];
     this.branches = [];
     this.branchesLoadedFor = null;
     this.branchPickerOpen = false;
@@ -499,6 +505,8 @@ export default class ChangesHistory extends View {
     this.historyLoading = false;
     this.historyError = null;
     this.historyLoadedFor = null;
+    this.historyBefore = null;
+    this.historyBeforeStack = [];
     this.graphQuery = "";
     this.graphSearchInput?.set_value("");
     this.graphBranchRef = "";
@@ -531,6 +539,7 @@ export default class ChangesHistory extends View {
       this.context = { key: next, on, dirtyAt: 0 };
       this.root = null;
       this.branch = "";
+      this.remoteBranchUrl = null;
       this.staged = [];
       this.unstaged = [];
       this.stashes = [];
@@ -571,6 +580,7 @@ export default class ChangesHistory extends View {
         if (top.code !== 0) {
           this.root = null;
           this.branch = "";
+          this.remoteBranchUrl = null;
           this.staged = [];
           this.unstaged = [];
           this.stashes = [];
@@ -583,12 +593,41 @@ export default class ChangesHistory extends View {
         const git = (args) => exec("git", [...READ, ...args], { cwd: root, on });
         this.watch(root, context, cx);
 
-        const [scan, brRes, stashRes] = await Promise.all([
+        const [scan, brRes, stashRes, upRes] = await Promise.all([
           repoStatus(root, on, request, cx, () => this.context === context),
           git(["branch", "--show-current"]),
           git(["stash", "list", "--pretty=format:%gd%x1f%gs%x1f%cr"]),
+          git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]),
         ]);
         if (!scan || !this.current(context)) return;
+
+        const currentBranch = (brRes.stdout || "").trim();
+        let remoteBranchUrl = null;
+        if (currentBranch) {
+          let remoteName = null;
+          let remoteBranch = null;
+          if (upRes.code === 0) {
+            const upstream = (upRes.stdout || "").trim();
+            const slash = upstream.indexOf("/");
+            if (slash > 0) {
+              remoteName = upstream.slice(0, slash);
+              remoteBranch = upstream.slice(slash + 1);
+            }
+          } else {
+            const refCheck = await git(["show-ref", "--verify", "--quiet", `refs/remotes/origin/${currentBranch}`]);
+            if (refCheck.code === 0) {
+              remoteName = "origin";
+              remoteBranch = currentBranch;
+            }
+          }
+          if (remoteName && remoteBranch) {
+            const urlRes = await git(["remote", "get-url", remoteName]);
+            if (urlRes.code === 0) {
+              remoteBranchUrl = buildRemoteBranchUrl(urlRes.stdout, remoteBranch);
+            }
+          }
+        }
+        if (!this.current(context)) return;
 
         const { started, pollAt, watchAt } = scan;
         context.lastStatus = started;
@@ -613,7 +652,8 @@ export default class ChangesHistory extends View {
         if (!this.current(context)) return;
         this.root = root;
         this.on = on;
-        this.branch = (brRes.stdout || "").trim() || "HEAD";
+        this.branch = currentBranch || "HEAD";
+        this.remoteBranchUrl = remoteBranchUrl;
         this.staged = staged;
         this.unstaged = unstaged;
         this.stashes = stashes;
@@ -883,6 +923,8 @@ export default class ChangesHistory extends View {
   }
 
   scheduleHistorySearch(cx) {
+    this.historyBefore = null;
+    this.historyBeforeStack = [];
     const seq = ++this.historySeq;
     cx.spawn(async cx => {
       await cx.sleep(GRAPH_SEARCH_DEBOUNCE_MS);
@@ -923,6 +965,34 @@ export default class ChangesHistory extends View {
     this.graphBranchRef = ref;
     this.graphBranchLabel = label;
     this.branchPickerOpen = false;
+    this.historyBefore = null;
+    this.historyBeforeStack = [];
+    this.loadHistory(cx, true);
+  }
+
+  pageHistoryOlder(cx) {
+    const last = this.commits[this.commits.length - 1];
+    if (!last || !last.ts) return;
+    this.historyBeforeStack.push(this.historyBefore);
+    if (this.historyBeforeStack.length > MAX_HISTORY_PAGES) {
+      this.historyBeforeStack.shift();
+    }
+    this.historyBefore = { ts: last.ts - 1, label: last.date || String(last.ts) };
+    this.loadHistory(cx, true);
+  }
+
+  pageHistoryNewer(cx) {
+    if (!this.historyBeforeStack.length) {
+      this.historyBefore = null;
+    } else {
+      this.historyBefore = this.historyBeforeStack.pop() ?? null;
+    }
+    this.loadHistory(cx, true);
+  }
+
+  resetHistoryDatePage(cx) {
+    this.historyBefore = null;
+    this.historyBeforeStack = [];
     this.loadHistory(cx, true);
   }
 
@@ -934,6 +1004,7 @@ export default class ChangesHistory extends View {
     const seq = ++this.historySeq;
     const query = this.graphQuery.trim();
     const branchRef = this.graphBranchRef;
+    const beforeTs = this.historyBefore?.ts ?? null;
     this.historyLoading = true;
     this.historyError = null;
 
@@ -942,8 +1013,11 @@ export default class ChangesHistory extends View {
       "log",
       "-n",
       String(limit),
-      "--pretty=format:%H%x1f%h%x1f%an%x1f%ar%x1f%cs%x1f%D%x1f%s",
+      "--pretty=format:%H%x1f%h%x1f%an%x1f%ar%x1f%cs%x1f%ct%x1f%D%x1f%s",
     ];
+    if (beforeTs !== null) {
+      args.push(`--before=${beforeTs}`);
+    }
     if (query) {
       args.push("--fixed-strings", "--regexp-ignore-case", `--grep=${query}`);
     }
@@ -966,7 +1040,7 @@ export default class ChangesHistory extends View {
         const parsed = [];
         for (const line of (r.stdout || "").split("\n")) {
           if (!line) continue;
-          const [hash, shortHash, author, relDate, date, refs, ...subjectParts] = line.split("\x1f");
+          const [hash, shortHash, author, relDate, date, tsStr, refs, ...subjectParts] = line.split("\x1f");
           if (!hash) continue;
           parsed.push({
             hash,
@@ -974,6 +1048,7 @@ export default class ChangesHistory extends View {
             author: author || "",
             relDate: relDate || "",
             date: date || "",
+            ts: Number(tsStr) || 0,
             refs: (refs || "").split(",").map(s => s.trim()).filter(Boolean),
             subject: subjectParts.join("\x1f") || "(no message)",
           });
@@ -1715,7 +1790,28 @@ export default class ChangesHistory extends View {
           .border_color(t.border)
           .child(div().font_semibold().text_size(12.5).child("Changes"))
           .when(Boolean(this.branch), el =>
-            el.child(div().px(5).py(1).rounded(4).bg(t.surface).text_size(10.5).text_color(t.dim).truncate().max_w(110).child(this.branch)),
+            el.child(
+              h_flex()
+                .id("sc-branch-link")
+                .px(6)
+                .py(1)
+                .gap(4)
+                .items_center()
+                .rounded(4)
+                .bg(t.surface)
+                .text_size(10.5)
+                .text_color(this.remoteBranchUrl ? t.accent : t.dim)
+                .max_w(140)
+                .when(Boolean(this.remoteBranchUrl), b =>
+                  b
+                    .cursor_pointer()
+                    .hover(s => s.bg(t.hover).text_color(t.foreground))
+                    .tooltip(`Open remote branch in browser\n${this.remoteBranchUrl}`)
+                    .on_click((_e, cx) => cx.open_url(this.remoteBranchUrl)),
+                )
+                .child(div().flex_1().min_w(0).truncate().child(this.branch))
+                .when(Boolean(this.remoteBranchUrl), b => b.child(div().flex_none().text_size(10).child("↗"))),
+            ),
           )
           .child(div().flex_1())
           .when(Boolean(this.root), el =>
@@ -1969,6 +2065,8 @@ export default class ChangesHistory extends View {
                           this.branchPickerOpen = false;
                           this.historyLimit = 50;
                           this.historyLoadedFor = null;
+                          this.historyBefore = null;
+                          this.historyBeforeStack = [];
                           cx.notify();
                           return;
                         }
@@ -2035,9 +2133,28 @@ export default class ChangesHistory extends View {
                               clr.child(this.actionBtn(t, "graph-search-clear", "×", "Clear search", (_e, cx) => {
                                 this.graphQuery = "";
                                 this.graphSearchInput?.set_value("");
+                                this.historyBefore = null;
+                                this.historyBeforeStack = [];
                                 this.loadHistory(cx, true);
                               })),
                             ),
+                        )
+                        .when(Boolean(this.historyBefore), pg =>
+                          pg.child(
+                            h_flex()
+                              .mx(4)
+                              .px(8)
+                              .py(4)
+                              .gap(6)
+                              .items_center()
+                              .rounded(6)
+                              .bg(t.surface)
+                              .border_1()
+                              .border_color(t.border)
+                              .child(div().flex_1().min_w(0).truncate().text_size(10.5).text_color(t.muted).child(`Page ${this.historyBeforeStack.length + 1} · before ${this.historyBefore.label}`))
+                              .child(this.actionBtn(t, "hist-page-newer", "← Newer", "Previous newer page", (_e, cx) => this.pageHistoryNewer(cx)))
+                              .child(this.actionBtn(t, "hist-page-latest", "Latest", "Back to latest commits", (_e, cx) => this.resetHistoryDatePage(cx))),
+                          ),
                         )
                         .when(this.branchPickerOpen, bp => {
                           const branchListH = Math.min(180, (2 + this.branches.length) * 25 + 10);
@@ -2157,9 +2274,40 @@ export default class ChangesHistory extends View {
                                 this.historyLimit = Math.min(MAX_HISTORY_LIMIT, this.historyLimit + step);
                                 this.loadHistory(cx, false);
                               })
-                              .child(this.historyLimit >= 200 ? "Load 100 more commits" : "Load 50 more commits"),
+                              .child(this.historyLimit >= 200 ? `Load 100 more commits (max ${MAX_HISTORY_LIMIT}/page)` : `Load 50 more commits (max ${MAX_HISTORY_LIMIT}/page)`),
                           ),
-                        ),
+                        )
+                        .when(this.commits.length >= MAX_HISTORY_LIMIT && !this.historyLoading, el => {
+                          const last = this.commits[this.commits.length - 1];
+                          const lastDate = last?.date || "oldest shown";
+                          return el.child(
+                            v_flex()
+                              .mt(4)
+                              .mx(6)
+                              .p(6)
+                              .gap(5)
+                              .rounded(6)
+                              .bg(t.surface)
+                              .border_1()
+                              .border_color(t.border)
+                              .child(div().text_center().text_size(10.5).text_color(t.dim).child(`Page limit reached (${MAX_HISTORY_LIMIT} commits max per page)`))
+                              .child(
+                                div()
+                                  .id("hist-page-older")
+                                  .py(4)
+                                  .rounded(5)
+                                  .bg(t.raised)
+                                  .text_center()
+                                  .text_size(11)
+                                  .font_medium()
+                                  .text_color(t.foreground)
+                                  .cursor_pointer()
+                                  .hover(s => s.bg(t.hover))
+                                  .on_click((_e, cx) => this.pageHistoryOlder(cx))
+                                  .child(`Older commits (before ${lastDate}) →`),
+                              ),
+                          );
+                        }),
                     ),
                   )
                   .child(
