@@ -8,7 +8,7 @@ const scans = globalThis[Symbol.for("herdr.changesStatus.v3")] ??= new Map();
 const MAX_SCANS = 4;
 const MAX_DIFF_LINES = 1000;
 const MAX_DIFF_LINE_CHARS = 2000;
-const MAX_HISTORY_LIMIT = 200;
+const MAX_HISTORY_LIMIT = 1000;
 const MAX_BRANCHES = 150;
 const GRAPH_SEARCH_DEBOUNCE_MS = 220;
 const PR_SEARCH_DEBOUNCE_MS = 280;
@@ -898,14 +898,14 @@ export default class ChangesHistory extends View {
       try {
         const r = await exec(
           "git",
-          [...READ, "for-each-ref", "--sort=-committerdate", "--format=%(refname:short)%x1f%(refname)", "refs/heads", "refs/remotes"],
+          [...READ, "for-each-ref", "--sort=-committerdate", "--format=%(refname:short)%09%(refname)", "refs/heads", "refs/remotes"],
           { cwd: root, on, timeout: 6000 },
         );
         if (!this.current(context) || r.code !== 0) return;
         const parsed = [];
         for (const line of (r.stdout || "").split("\n")) {
           if (!line) continue;
-          const [label, fullRef] = line.split("\x1f");
+          const [label, fullRef] = line.split("\t");
           if (!label || !fullRef || label.endsWith("/HEAD")) continue;
           parsed.push({ label, fullRef, isRemote: fullRef.startsWith("refs/remotes/") });
           if (parsed.length >= MAX_BRANCHES) break;
@@ -2039,12 +2039,14 @@ export default class ChangesHistory extends View {
                               })),
                             ),
                         )
-                        .when(this.branchPickerOpen, bp =>
-                          bp.child(
+                        .when(this.branchPickerOpen, bp => {
+                          const branchListH = Math.min(180, (2 + this.branches.length) * 25 + 10);
+                          return bp.child(
                             v_flex()
                               .id("graph-branch-list")
                               .mx(4)
-                              .max_h(150)
+                              .h(branchListH)
+                              .flex_none()
                               .overflow_y_scrollbar()
                               .p(4)
                               .gap(1)
@@ -2056,6 +2058,7 @@ export default class ChangesHistory extends View {
                                 h_flex()
                                   .id("br-opt-current")
                                   .h(24)
+                                  .flex_none()
                                   .px(6)
                                   .gap(6)
                                   .items_center()
@@ -2070,6 +2073,7 @@ export default class ChangesHistory extends View {
                                 h_flex()
                                   .id("br-opt-all")
                                   .h(24)
+                                  .flex_none()
                                   .px(6)
                                   .gap(6)
                                   .items_center()
@@ -2085,6 +2089,7 @@ export default class ChangesHistory extends View {
                                   h_flex()
                                     .id(`br-opt-${br.fullRef}`)
                                     .h(24)
+                                    .flex_none()
                                     .px(6)
                                     .gap(6)
                                     .items_center()
@@ -2097,8 +2102,8 @@ export default class ChangesHistory extends View {
                                     .when(br.isRemote, el => el.child(div().text_size(9.5).text_color(t.dim).child("remote"))),
                                 ),
                               ),
-                          ),
-                        )
+                          );
+                        })
                         .when(Boolean(this.historyError), e => e.child(div().px(10).py(6).text_size(11.5).text_color(t.ansi1).child(this.historyError)))
                         .when(!this.commits.length && !this.historyError, e =>
                           e.child(div().px(10).py(6).text_size(11.5).text_color(t.dim).child(this.historyLoading ? "Loading commits…" : this.graphQuery.trim() ? "No matching commits" : "No commits yet")),
@@ -2148,10 +2153,11 @@ export default class ChangesHistory extends View {
                               .cursor_pointer()
                               .hover(s => s.bg(t.hover).text_color(t.foreground))
                               .on_click((_e, cx) => {
-                                this.historyLimit = Math.min(MAX_HISTORY_LIMIT, this.historyLimit + 50);
+                                const step = this.historyLimit >= 200 ? 100 : 50;
+                                this.historyLimit = Math.min(MAX_HISTORY_LIMIT, this.historyLimit + step);
                                 this.loadHistory(cx, false);
                               })
-                              .child("Load 50 more commits"),
+                              .child(this.historyLimit >= 200 ? "Load 100 more commits" : "Load 50 more commits"),
                           ),
                         ),
                     ),
