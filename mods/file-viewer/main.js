@@ -54,12 +54,12 @@ function formatBytes(bytes) {
   return `${bytes} B`;
 }
 
-function createReadonlyEditor(file, content, softWrap) {
+function createEditorState(file, content, softWrap, readOnly = false) {
   const t = theme();
   const ext = file.includes(".") ? file.split(".").pop().toLowerCase() : "txt";
   return EditorState.new({
     language: LANG[ext] ?? ext,
-    readonly: true,
+    readonly: readOnly,
     soft_wrap: softWrap,
     value: content,
     syntax: {
@@ -79,6 +79,11 @@ export default class FileViewer extends View {
     const p = (initialProps && Object.keys(initialProps).length ? initialProps : null) ?? props();
     this.code = null;
     this.rawText = null;
+    this.originalContent = null;
+    this.fileTruncated = false;
+    this.codeDirty = false;
+    this.codeSaving = false;
+    this.codeSaveError = null;
     this.lineStarts = null;
     this.textLen = 0;
     this.file = null;
@@ -174,6 +179,11 @@ export default class FileViewer extends View {
     this.code?.release();
     this.code = null;
     this.rawText = null;
+    this.originalContent = null;
+    this.fileTruncated = false;
+    this.codeDirty = false;
+    this.codeSaving = false;
+    this.codeSaveError = null;
     this.lineStarts = null;
     this.textLen = 0;
     this.csvTable = null;
@@ -247,8 +257,12 @@ export default class FileViewer extends View {
     return Boolean(this.code || this.rawText !== null || this.imageRelPath || this.csvTable || this.pdfRelPath);
   }
 
+  isDirty() {
+    return Boolean(this.csvDirty || this.codeDirty);
+  }
+
   hibernate(cx, fromRender = false) {
-    if (this.hibernated || this.csvDirty || !this.hasLoadedContent()) return;
+    if (this.hibernated || this.isDirty() || !this.hasLoadedContent()) return;
     this.loadSeq++;
     this.releaseBuffers();
     this.loading = false;
@@ -305,7 +319,7 @@ export default class FileViewer extends View {
       preview: hasPreview ? this.previewMode : (this.kind === "image" || this.kind === "pdf"),
       wrap: this.softWrap,
       zoomPct,
-      dirty: Boolean(this.csvDirty),
+      dirty: this.isDirty(),
     };
     const all = shared("file-viewer.meta") ?? {};
     const prev = all[paneId];
@@ -324,12 +338,95 @@ export default class FileViewer extends View {
     setShared("file-viewer.meta", { ...all, [paneId]: next });
   }
 
+  attachEditor(file, content) {
+    this.code?.release();
+    const ed = createEditorState(file, content, this.softWrap, this.fileTruncated);
+    if (!this.fileTruncated) {
+      ed.on("change", (_e, cx) => {
+        if (this.code !== ed) return;
+        const nextVal = ed.value();
+        this.codeDirty = nextVal !== this.originalContent;
+        this.codeSaveError = null;
+        if (this.kind === "markdown" || this.kind === "csv" || this.kind === "svg") {
+          this.rawText = nextVal;
+        }
+        this.publishMeta();
+        cx.notify();
+      });
+    }
+    this.code = ed;
+    return ed;
+  }
+
+  discardCodeEdits(cx) {
+    if (this.originalContent === null) return;
+    this.codeDirty = false;
+    this.codeSaveError = null;
+    if (this.code) this.code.set_value(this.originalContent);
+    if (this.kind === "markdown" || this.kind === "csv" || this.kind === "svg") {
+      this.rawText = this.originalContent;
+      if (this.kind === "csv") {
+        this.csvTable = parseCsvTable(this.originalContent, this.file.toLowerCase().endsWith(".tsv"));
+        this.csvUniqueCache.clear();
+        this.rebuildCsvViewRows();
+      }
+    }
+    this.publishMeta();
+    cx.notify();
+  }
+
+  saveCodeEdits(cx) {
+    if (!this.code || !this.codeDirty || this.codeSaving || this.fileTruncated || !this.file || !this.root) return;
+    const content = this.code.value();
+    const fullPath = `${this.root}/${this.file}`;
+    const on = this.on;
+    const expected = this.originalContent;
+    this.codeSaving = true;
+    this.codeSaveError = null;
+    cx.notify();
+
+    cx.spawn(async cx => {
+      try {
+        await saveTextFile(fullPath, on, content, expected);
+        this.originalContent = content;
+        this.codeDirty = false;
+        this.codeSaveError = null;
+        if (this.kind === "markdown" || this.kind === "csv" || this.kind === "svg") {
+          this.rawText = content;
+        }
+        if (this.kind === "csv") {
+          this.csvOriginalText = content;
+          this.csvTable = parseCsvTable(content, this.file.toLowerCase().endsWith(".tsv"));
+          this.csvEditedCells = new Set();
+          this.csvDirty = false;
+          this.csvUniqueCache.clear();
+          this.rebuildCsvViewRows();
+        }
+      } catch (e) {
+        this.codeSaveError = String(e?.message || e || "Save failed");
+      } finally {
+        this.codeSaving = false;
+        this.publishMeta();
+        cx.notify();
+      }
+    });
+  }
+
   togglePreviewMode(cx) {
     if (!this.supportsRawToggle()) return;
     this.previewMode = !this.previewMode;
     if (this.previewMode) {
-      this.code?.release();
-      this.code = null;
+      if (this.code) {
+        const currentVal = this.code.value();
+        this.rawText = currentVal;
+        if (this.kind === "csv" && this.codeDirty) {
+          this.csvTable = parseCsvTable(currentVal, this.file.toLowerCase().endsWith(".tsv"));
+          this.csvUniqueCache.clear();
+          this.rebuildCsvViewRows();
+        }
+        this.code.release();
+        this.code = null;
+      }
       return;
     }
     const seq = ++this.loadSeq;
@@ -346,13 +443,14 @@ export default class FileViewer extends View {
         if (content === null && isSvg && file && this.root) {
           const text = await readTextFile(fullPath, { on });
           if (this.loadSeq !== seq || text === null) return;
-          content = text.length > MAX_FILE_CHARS ? text.slice(0, MAX_FILE_CHARS) + "\n… (truncated)" : text;
+          this.fileTruncated = text.length > MAX_FILE_CHARS;
+          content = this.fileTruncated ? text.slice(0, MAX_FILE_CHARS) + "\n… (truncated)" : text;
+          this.originalContent = this.fileTruncated ? null : text;
           this.rawText = content;
         }
         if (this.loadSeq !== seq || this.previewMode || content === null) return;
-        this.code?.release();
-        this.code = createReadonlyEditor(file, content, this.softWrap);
-        if (this.highlightRange) this.code.set_selected_range(this.highlightRange);
+        const ed = this.attachEditor(file, content);
+        if (this.highlightRange) ed.set_selected_range(this.highlightRange);
       } catch (e) {
         if (this.loadSeq === seq) this.error = String(e?.message || e);
       } finally {
@@ -508,9 +606,11 @@ export default class FileViewer extends View {
           this.error = "Binary file · no text preview";
           return;
         }
-        const content = text.length > MAX_FILE_CHARS
+        this.fileTruncated = text.length > MAX_FILE_CHARS;
+        const content = this.fileTruncated
           ? text.slice(0, MAX_FILE_CHARS) + "\n… (file truncated at 250 KB to save RAM)"
           : text;
+        this.originalContent = this.fileTruncated ? null : text;
         this.lineStarts = buildLineStarts(content);
         this.textLen = content.length;
 
@@ -529,6 +629,7 @@ export default class FileViewer extends View {
           this.csvMenuInput?.set_value("");
           this.csvCellInput?.set_value("");
           this.csvColFilters = new Map();
+          this.csvUniqueCache.clear();
           this.csvFilterMenuCol = -1;
           this.csvSortCol = -1;
           this.csvSortDir = 0;
@@ -542,8 +643,8 @@ export default class FileViewer extends View {
           this.rawText = content;
           this.code = null;
         } else {
-          this.code = createReadonlyEditor(this.file, content, this.softWrap);
-          if (range) this.code.set_selected_range(range);
+          const ed = this.attachEditor(this.file, content);
+          if (range) ed.set_selected_range(range);
           this.rawText = kind === "markdown" ? content : null;
         }
       } catch (e) {
@@ -1722,7 +1823,66 @@ export default class FileViewer extends View {
         .text_color(t.foreground)
         .child(tv.flex_1().min_h(0));
     } else if (this.code) {
-      body = Editor.new(this.code).font_family(font.font_family).text_size(fontSize).flex_1().min_h(0);
+      body = v_flex()
+        .flex_1()
+        .min_h(0)
+        .when(this.codeDirty || Boolean(this.codeSaveError), el =>
+          el.child(
+            h_flex()
+              .h(30)
+              .flex_none()
+              .px(10)
+              .gap(8)
+              .items_center()
+              .bg(t.surface)
+              .border_b(1)
+              .border_color(t.border)
+              .child(
+                div()
+                  .px(6)
+                  .py(1)
+                  .rounded(4)
+                  .bg(t.blocked + "26")
+                  .text_size(11)
+                  .font_semibold()
+                  .text_color(t.blocked)
+                  .child("* Unsaved changes"),
+              )
+              .when(Boolean(this.codeSaveError), err =>
+                err.child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.ansi1).child(this.codeSaveError)),
+              )
+              .when(!this.codeSaveError, sp => sp.child(div().flex_1()))
+              .child(
+                div()
+                  .id("fv-code-discard")
+                  .px(7)
+                  .py(2)
+                  .rounded(5)
+                  .bg(t.raised)
+                  .text_size(11)
+                  .text_color(t.muted)
+                  .cursor_pointer()
+                  .hover(s => s.bg(t.hover).text_color(t.foreground))
+                  .on_click((_e, cx) => this.discardCodeEdits(cx))
+                  .child("↺ Discard"),
+              )
+              .child(
+                div()
+                  .id("fv-code-save")
+                  .px(8)
+                  .py(2)
+                  .rounded(5)
+                  .bg(t.solid)
+                  .text_size(11)
+                  .font_semibold()
+                  .text_color(t.solid_foreground)
+                  .cursor_pointer()
+                  .on_click((_e, cx) => this.saveCodeEdits(cx))
+                  .child(this.codeSaving ? "Saving…" : "✓ Save (Ctrl+S)"),
+              ),
+          ),
+        )
+        .child(Editor.new(this.code).font_family(font.font_family).text_size(fontSize).flex_1().min_h(0));
     } else {
       const placeholder = this.loading || this.hibernated ? "Loading file…" : "Select a file from the Files panel";
       body = div().p(14).text_size(12.5).text_color(t.dim).child(placeholder);
@@ -1747,6 +1907,17 @@ export default class FileViewer extends View {
         if (!this.resizingCol) return;
         this.resizingCol = null;
         cx.notify();
+      })
+      .on_key_down((e, cx) => {
+        if ((e.modifiers?.control || e.modifiers?.platform) && e.key?.toLowerCase() === "s") {
+          if (this.kind === "csv" && this.previewMode && this.csvDirty) {
+            cx.stop_propagation();
+            this.saveCsvEdits(cx);
+          } else if (this.code && this.codeDirty) {
+            cx.stop_propagation();
+            this.saveCodeEdits(cx);
+          }
+        }
       })
       .on_scroll_wheel((e, cx) => {
         if (!e.modifiers?.control && !e.modifiers?.platform) return;
