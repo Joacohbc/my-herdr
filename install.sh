@@ -8,7 +8,7 @@ mkdir -p "$HERDR_HOME/layouts" "$HERDR_HOME/mods"
 
 ln -sfn "$REPO_DIR/layouts/my-herdr.json" "$HERDR_HOME/layouts/my-herdr.json"
 
-for mod in files-search file-viewer pane-custom system-monitor tiling-mode; do
+for mod in files-search file-viewer pane-custom system-monitor tiling-mode changes-history; do
   target="$HERDR_HOME/mods/$mod"
   if [ -d "$target" ] && [ ! -L "$target" ]; then
     rm -rf "$target"
@@ -20,7 +20,7 @@ node "$REPO_DIR/scripts/apply-tiling-keys.js"
 
 echo "Linked my-herdr layout and mods into $HERDR_HOME"
 echo "Validating mods..."
-for mod in files-search file-viewer pane-custom system-monitor tiling-mode; do
+for mod in files-search file-viewer pane-custom system-monitor tiling-mode changes-history; do
   herdr-app check "$HERDR_HOME/mods/$mod"
 done
 echo "Done. Switch layout with: herdr-app do layout.switch '{\"name\":\"my-herdr\"}'"

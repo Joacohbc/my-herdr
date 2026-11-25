@@ -69,6 +69,9 @@ Para el inventario completo de archivos, mods, repositorios de iconos y arquitec
   - `Base + [` / `]`: mover tab izquierda/derecha
   - `Ctrl + Space` (o `Base + r`): abrir el HUD modal `tiling-mode` (navegación, swap, modo Resize con flechas `r`, splits, cerrar/reabrir).
 
+### Panel de cambios e historial Git (`changes-history`)
+- Debe mantener intactas las funciones nativas de `Changes` (archivos modificados, diff virtualizado y commit) y sumar la pestaña **`History`** en la barra superior para ver el historial de commits (`git log`), abrir cualquier commit, listar sus archivos modificados y ver el diff virtualizado de cada archivo (compatible con repos locales y remotos SSH).
+
 ### Monitor de sistema en el lateral izquierdo (`system-monitor`)
 - Mostrar **CPU total** y **RAM total** (uso / total / % con barra de color dinámico) + **procesos agrupados por aplicación** ordenables por `RAM` o `CPU`.
 - **Modo minimizado (rail colapsado `< 140 px`):**

@@ -45,7 +45,7 @@ root (row)
     │   ├── main         → tab: active, pane header → mod: pane-custom [CUSTOM]
     │   └── panel (stack)
     │       ├── files    → mod: files-search       [CUSTOM]
-    │       └── changes  → mod: changes
+    │       └── changes  → mod: changes-history    [CUSTOM]
     └── status           → mod: workspace-status
 ```
 
@@ -110,6 +110,16 @@ Modo Tiling Manager & Resize HUD activado con `Ctrl+Space` (o `Ctrl+Alt+R`), má
 | `tiling-config.json` | Define `base_modifier` (`ctrl-alt`), `leader_key` (`ctrl-space`), `layout` y `resize_step_px` |
 | `scripts/apply-tiling-keys.js` | Aplica los atajos en `"layout:my-herdr"` dentro de `~/.config/herdr-app/keys.json` sin alterar el resto |
 | `mods/tiling-mode/main.js` | HUD flotante modal con modo **Tiling** (flechas foco, `Shift+flechas` swap, `Ctrl+flechas` resize, `v/s/z/q/Q/w/W/[/]/{/}/n`) y modo **Resize** (`r` + flechas ±40px, `Shift` ±16px, `Ctrl` ±90px) |
+
+---
+
+### 4.6 `changes-history` (`~/.config/herdr-app/mods/changes-history/`)
+Clon extendido del panel `changes` con pestaña **`History`** para navegar commits y diffs históricos (local y SSH).
+
+| Archivo | Responsabilidad |
+|---|---|
+| `main.js` | Pestaña `Changes` (uncommitted + diff virtualizado + commit) y pestaña `History` (`git log`, refs/hash/autor/fecha, paginación `+50`, detalle de archivos del commit con `diff-tree --root` y diff virtualizado con `git show`) |
+| `changes.svg`, `mod.json` | Icono y manifiesto del mod |
 
 ---
 
