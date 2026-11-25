@@ -44,13 +44,35 @@ function snapshotPane(p) {
   return { kind: "terminal", cwd: p.cwd || null, name: p.name || null };
 }
 
+const MAX_CLOSED_HISTORY = 8;
+
+function pushBoundedHistory(key, entry) {
+  const prev = shared(key) ?? [];
+  const last = prev[prev.length - 1];
+  if (last && JSON.stringify(last) === JSON.stringify(entry)) return;
+  setShared(key, [...prev, entry].slice(-MAX_CLOSED_HISTORY));
+}
+
+function pruneOrphanViewerMeta() {
+  const meta = shared("file-viewer.meta");
+  if (!meta || typeof meta !== "object") return;
+  const activeIds = new Set(panes().filter(p => p.mod === "file-viewer").map(p => p.pane));
+  let changed = false;
+  const next = {};
+  for (const [id, val] of Object.entries(meta)) {
+    if (activeIds.has(id)) next[id] = val;
+    else changed = true;
+  }
+  if (changed) setShared("file-viewer.meta", next);
+}
+
 function closeFocusedPane() {
   const f = focused();
   const p = f?.pane ? panes().find(x => x.pane === f.pane) : null;
   if (!p) return;
-  const stack = [...(shared("tiling.closedPanes") ?? []), snapshotPane(p)].slice(-20);
-  setShared("tiling.closedPanes", stack);
+  pushBoundedHistory("tiling.closedPanes", snapshotPane(p));
   run("pane.close", { pane: p.pane });
+  pruneOrphanViewerMeta();
 }
 
 function reopenClosedPane() {
@@ -78,10 +100,10 @@ function closeFocusedTab() {
   const space = spaces().find(s => s.active);
   const tab = space?.tabs?.find(t => t.active);
   if (!tab) return;
-  const tabPanes = panes().filter(p => p.tab === tab.id).map(snapshotPane);
-  const stack = [...(shared("tiling.closedTabs") ?? []), { name: tab.name, panes: tabPanes }].slice(-20);
-  setShared("tiling.closedTabs", stack);
+  const tabPanes = panes().filter(p => p.tab === tab.id).slice(0, 4).map(snapshotPane);
+  pushBoundedHistory("tiling.closedTabs", { name: tab.name, panes: tabPanes });
   run("tab.close", { id: tab.id });
+  pruneOrphanViewerMeta();
 }
 
 function reopenClosedTab() {
@@ -207,7 +229,7 @@ export default class PaneCustom extends View {
       .when(st === "working", el => el.child(svg("mods/workspace-chrome/spinner.svg").size(12).flex_none().text_color(t.working).spin(900)))
       .when(st === "blocked", el => el.child(div().flex_none().px(6).h(18).flex().items_center().rounded(5).bg(t.blocked + "26").text_size(10.5).font_semibold().text_color(t.blocked).child("Needs you")))
       .when(st === "done", el => el.child(div().size(7).flex_none().rounded(4).bg(t.done)))
-      .when(isViewer && Boolean(meta?.md), el => el
+      .when(isViewer && Boolean(meta?.hasPreview ?? meta?.md), el => el
         .child(this.pill(t, `ph-md-${pane}`, meta.preview ? "Preview" : "Raw", Boolean(meta.preview), () => sendViewerCmd(pane, "toggle_preview"))))
       .when(isViewer && !meta?.preview, el => el
         .child(this.pill(t, `ph-wrap-${pane}`, "Wrap", Boolean(meta?.wrap), () => sendViewerCmd(pane, "toggle_wrap"))))

@@ -1,21 +1,54 @@
-// A lazy file browser for the focused pane's folder, with VS Code-style search and read-only previews.
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Input, InputState } from "gpui-base";
-import { spaces, panes, focused, exec, watchFolder, theme, window, checking, run, shared, setShared } from "herdr";
+import { spaces, panes, focused, exec, watchFolder, theme, window, layout, checking, run, shared, setShared } from "herdr";
 import { searchContent, searchFiles, MAX_MATCHES } from "./search.js";
-import { fileIcon, folderIcon } from "./material-icons.js";
+import { fileIcon, folderIcon, releaseIconCache } from "./material-icons.js";
 
-const scans = globalThis[Symbol.for("herdr.repoStatus.v2")] ??= new Map();
+const scans = globalThis[Symbol.for("herdr.repoStatus.v3")] ??= new Map();
+const MAX_SCANS = 4;
+
+function findLayoutNode(node, id) {
+  if (node?.id === id) return node;
+  for (const child of node?.children ?? []) {
+    const found = findLayoutNode(child, id);
+    if (found) return found;
+  }
+  return null;
+}
+
+function isFilesPanelVisible() {
+  if (window()?.visible === false) return false;
+  const root = layout();
+  const panel = findLayoutNode(root, "panel");
+  if (!panel || panel.hidden) return false;
+  const body = findLayoutNode(root, "panel-body");
+  return !body || body.active === "files";
+}
+
+function parseMarksFromPorcelain(stdout, root, limit) {
+  const marks = {};
+  let count = 0;
+  for (const entry of (stdout || "").split("\0")) {
+    if (!entry) continue;
+    if (++count > limit) break;
+    const xy = entry.slice(0, 2);
+    marks[`${root}/${entry.slice(3)}`] = xy === "??" || xy.includes("A") ? "A" : xy.includes("U") ? "U" : xy.includes("D") ? "D" : "M";
+  }
+  return marks;
+}
 
 async function repoStatus(root, on, { after, visiting, urgent, allowInactive }, cx, current) {
   const repo = JSON.stringify([on, root]), now = Date.now();
-  for (const [key, scan] of scans) {
-    if (scan.pollAt <= now || (!scan.pollAt && scan.task.is_done())) scans.delete(key);
+  for (const [k, scan] of scans) {
+    if (scan.pollAt <= now || (!scan.pollAt && scan.task.is_done())) scans.delete(k);
+  }
+  while (scans.size > MAX_SCANS) {
+    scans.delete(scans.keys().next().value);
   }
   while (current()) {
     let scan = scans.get(repo);
     const pending = scan && !scan.pollAt && !scan.task.is_done();
-    const reusable = scan?.status?.code === 0 && Date.now() < scan.pollAt
+    const reusable = scan?.ok && Date.now() < scan.pollAt
       && (scan.started >= after || (!urgent && Date.now() < scan.watchAt));
     if (!reusable && (!pending || (visiting && scan.started !== undefined && scan.started < after))) {
       if (!allowInactive && window()?.active === false) return null;
@@ -25,7 +58,9 @@ async function repoStatus(root, on, { after, visiting, urgent, allowInactive }, 
         if (!allowInactive && window()?.active === false) return;
         next.started = Date.now();
         try {
-          next.status = await exec("git", ["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"], { cwd: root, on });
+          const r = await exec("git", ["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"], { cwd: root, on });
+          next.ok = r.code === 0;
+          next.marks = next.ok ? parseMarksFromPorcelain(r.stdout, root, TOTAL) : {};
         } catch (error) {
           next.error = error;
         } finally {
@@ -33,7 +68,7 @@ async function repoStatus(root, on, { after, visiting, urgent, allowInactive }, 
           const delay = duration < 500 ? 0 : Math.min(60000, 5 * duration);
           next.watchAt = finished + delay;
           next.pollAt = finished + Math.max(10000, delay);
-          if (next.status?.code !== 0 && scans.get(repo) === next) scans.delete(repo);
+          if (!next.ok && scans.get(repo) === next) scans.delete(repo);
         }
       });
       scans.set(repo, next);
@@ -58,7 +93,11 @@ function location() {
   return { cwd: pane?.cwd || fallbackTermPane?.cwd || f?.cwd || space?.folder, on, space: space?.id };
 }
 const key = () => JSON.stringify(location());
-const PER_FOLDER = 500, TOTAL = 5000;
+const PER_FOLDER = 250, TOTAL = 1500;
+const MAX_OPEN_FOLDERS = 24;
+const MAX_SAVED_CONTEXTS = 8;
+const MAX_SAVED_FOLDERS = 10;
+const IDLE_CLEAN_MS = 30_000;
 const DEBOUNCE_MS = 180;
 
 async function directory(path, on) {
@@ -152,16 +191,47 @@ export default class FilesSearch extends View {
       cx.notify();
     });
 
+    this.hiddenSince = 0;
+    this.evicted = false;
+    this.lastGcSeq = shared("herdr.gc")?.seq ?? 0;
+
     if (checking()) return;
-    this.refresh(cx);
-    cx.timer.every(500, cx => this.refreshIfDue(cx));
+    if (isFilesPanelVisible()) this.refresh(cx);
+    cx.timer.every(1000, cx => this.refreshIfDue(cx));
   }
 
   close() {
     this.context?.watch?.pending?.cancel();
+    this.entries.clear();
+    this.saved.clear();
+    this.marks = {};
+    this.searchGroups = [];
+    this.fileResults = [];
+    releaseIconCache();
     this.searchInput?.release();
     this.includeInput?.release();
     this.excludeInput?.release();
+  }
+
+  evictCaches() {
+    this.context?.watch?.pending?.cancel();
+    if (this.context) this.context.watch = null;
+    if (this.evicted) return;
+    this.entries.clear();
+    this.marks = {};
+    this.pending.clear();
+    if (this.folders.size > MAX_SAVED_FOLDERS) {
+      this.folders = new Set([...this.folders].slice(-MAX_SAVED_FOLDERS));
+    }
+    this.searchGroups = [];
+    this.searchTotal = 0;
+    this.searchLimited = false;
+    this.collapsedResults.clear();
+    this.fileResults = [];
+    this.fileResultsLimited = false;
+    scans.clear();
+    releaseIconCache();
+    this.evicted = true;
   }
 
   scheduleSearch(cx, immediate = false) {
@@ -238,10 +308,34 @@ export default class FilesSearch extends View {
   }
 
   refreshIfDue(cx) {
+    const gcSeq = shared("herdr.gc")?.seq ?? 0;
+    const forceGc = gcSeq !== this.lastGcSeq;
+    this.lastGcSeq = gcSeq;
+
+    const visible = isFilesPanelVisible();
+    if (!visible) {
+      this.context?.watch?.pending?.cancel();
+      if (this.context) this.context.watch = null;
+      const now = Date.now();
+      if (!this.hiddenSince) this.hiddenSince = now;
+      if (forceGc || now - this.hiddenSince >= IDLE_CLEAN_MS) {
+        this.evictCaches();
+      }
+      return;
+    }
+
+    const wasEvicted = this.evicted;
+    this.hiddenSince = 0;
+    this.evicted = false;
+
     const active = window()?.active !== false, context = this.context;
     const refocused = active && this.windowActive === false;
     this.windowActive = active;
-    if (!context) return;
+    if (!context || wasEvicted) {
+      this.refresh(cx);
+      if (wasEvicted && this.query.trim()) this.scheduleSearch(cx, true);
+      return;
+    }
     if (refocused && (context.dirtyAt || !context.watch)) context.catchUp = true;
     if (!active || this.loading) return;
     const now = Date.now();
@@ -283,11 +377,17 @@ export default class FilesSearch extends View {
   }
 
   refresh(cx) {
+    if (!isFilesPanelVisible()) return;
     const { cwd, on } = location(), next = key();
     const visiting = next !== this.context?.key;
     if (visiting) {
       if (this.context) {
-        this.saved.set(this.context.key, { folders: this.folders });
+        const trimmedFolders = [...this.folders].slice(-MAX_SAVED_FOLDERS);
+        this.saved.delete(this.context.key);
+        this.saved.set(this.context.key, { folders: trimmedFolders });
+        while (this.saved.size > MAX_SAVED_CONTEXTS) {
+          this.saved.delete(this.saved.keys().next().value);
+        }
         this.context.watch?.pending?.cancel();
       }
       const saved = this.saved.get(next);
@@ -301,6 +401,7 @@ export default class FilesSearch extends View {
       this.error = null;
       this.limited = false;
       this.loading = false;
+      this.evicted = false;
       if (this.query.trim()) this.scheduleSearch(cx, true);
     }
     const context = this.context;
@@ -319,6 +420,7 @@ export default class FilesSearch extends View {
       urgent: visiting || context.catchUp,
       allowInactive: visiting,
     };
+    const needFolderReload = visiting || !this.entries.has("") || Boolean(context.dirtyAt) || Boolean(context.catchUp);
     context.catchUp = false;
     context.pollAt = context.watchAt = now + 10000;
     this.loading = true;
@@ -327,28 +429,27 @@ export default class FilesSearch extends View {
       try {
         this.watch(cwd, context, cx);
         const dirtyAtListing = context.dirtyAt;
-        for (const path of ["", ...this.folders]) {
-          if (!this.current(context)) return;
-          await this.loadFolder(path, context);
+        if (needFolderReload) {
+          for (const path of ["", ...this.folders]) {
+            if (!this.current(context)) return;
+            await this.loadFolder(path, context);
+          }
         }
         const top = await exec("git", ["rev-parse", "--show-toplevel"], { cwd, on }).catch(() => null);
         if (!this.current(context)) return;
-        const marks = {};
+        let marks = {};
         let covered = dirtyAtListing;
         if (top?.code === 0) {
           const root = top.stdout.trim();
           const scan = await repoStatus(root, on, request, cx, () => this.context === context);
           if (!scan || !this.current(context)) return;
-          const { status, started, pollAt, watchAt } = scan;
+          const { started, pollAt, watchAt } = scan;
           context.lastStatus = started;
           context.pollAt = pollAt;
           context.watchAt = watchAt;
           covered = Math.min(dirtyAtListing, started);
           if (request.urgent && request.after > started) context.catchUp = true;
-          if (status?.code === 0) for (const entry of status.stdout.split("\0").filter(Boolean).slice(0, TOTAL)) {
-            const xy = entry.slice(0, 2);
-            marks[`${root}/${entry.slice(3)}`] = xy === "??" || xy.includes("A") ? "A" : xy.includes("U") ? "U" : xy.includes("D") ? "D" : "M";
-          }
+          marks = scan.ok ? scan.marks : {};
         } else {
           context.watchAt = Date.now();
         }
@@ -371,7 +472,18 @@ export default class FilesSearch extends View {
         this.entries.delete(folder);
       }
     } else {
+      this.folders.delete(path);
       this.folders.add(path);
+      while (this.folders.size > MAX_OPEN_FOLDERS) {
+        const oldest = this.folders.values().next().value;
+        if (oldest === path || path.startsWith(oldest + "/")) break;
+        for (const folder of [...this.folders]) {
+          if (folder === oldest || folder.startsWith(oldest + "/")) {
+            this.folders.delete(folder);
+            this.entries.delete(folder);
+          }
+        }
+      }
       if (!this.entries.has(path) && !this.pending.has(path)) {
         const context = this.context;
         this.pending.add(path);
@@ -846,7 +958,7 @@ export default class FilesSearch extends View {
             .when(Boolean(this.error) || !this.entries.get("")?.length, empty =>
               empty.child(div().p(8).text_size(12).text_color(t.dim).child(this.error || (this.loading ? "Loading files…" : this.root ? "No files" : "No folder"))),
             )
-            .when(this.limited, lim => lim.child(div().p(8).text_size(11).text_color(t.dim).child("File list limited to 500 entries per folder and 5,000 total"))),
+            .when(this.limited, lim => lim.child(div().p(8).text_size(11).text_color(t.dim).child("File list limited to 250 entries per folder and 1,500 total"))),
         ),
       );
   }

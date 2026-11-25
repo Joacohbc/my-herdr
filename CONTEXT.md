@@ -40,7 +40,7 @@ root (row)
 │   │   └── system-monitor → mod: system-monitor   [CUSTOM]
 │   └── sidebar-footer   → mod: workspace-chrome (footer: true)
 └── work (column)
-    ├── tabs             → mod: tabs
+    ├── tabs             → mod: tabs-custom         [CUSTOM]
     ├── work-body (row)
     │   ├── main         → tab: active, pane header → mod: pane-custom [CUSTOM]
     │   └── panel (stack)
@@ -81,7 +81,8 @@ Visor dedicado que se abre como panel separado desde `files-search`.
 
 | Archivo | Responsabilidad |
 |---|---|
-| `main.js` | Carga archivos locales y remotos (`readTextFile`), renderiza Markdown con `TextView.markdown` y código con `Editor` |
+| `main.js` | Carga archivos locales y remotos (`readTextFile`), renderiza Markdown (`TextView.markdown`), Imágenes/SVG (`image`), CSV/TSV estilo Excel (`v_virtual_list`), PDF página a página (`pdftoppm`), y código (`Editor`) con buffer único e hibernación automática |
+| `preview.js` | Parser CSV/TSV RFC-4180, detección de tipo, staging temporal en `data/fv-preview/` y limpieza automática |
 | `mod.json` | `"place": "none", "focusable": true` |
 
 **Capacidades:**

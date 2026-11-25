@@ -1,20 +1,72 @@
-// VS Code-style Source Control panel: Commit, Staged/Unstaged Changes, Stashes, and Graph/History.
 import { View, div, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar, v_virtual_list } from "gpui-base";
-import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, window, checking, run, shared, setShared, props } from "herdr";
-import { fileIcon } from "./material-icons.js";
+import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, window, layout, checking, run, shared, setShared, props } from "herdr";
+import { fileIcon, releaseIconCache } from "./material-icons.js";
 
-const scans = globalThis[Symbol.for("herdr.repoStatus.v2")] ??= new Map();
+const scans = globalThis[Symbol.for("herdr.changesStatus.v3")] ??= new Map();
+const MAX_SCANS = 4;
+const MAX_DIFF_LINES = 1000;
+const MAX_DIFF_LINE_CHARS = 2000;
+const MAX_HISTORY_LIMIT = 200;
+const IDLE_CLEAN_MS = 30_000;
+const HIBERNATE_IDLE_MS = 45_000;
+const HIDDEN_BADGE_POLL_MS = 15_000;
+
+function findLayoutNode(node, id) {
+  if (node?.id === id) return node;
+  for (const child of node?.children ?? []) {
+    const found = findLayoutNode(child, id);
+    if (found) return found;
+  }
+  return null;
+}
+
+function isChangesPanelVisible() {
+  if (window()?.visible === false) return false;
+  const root = layout();
+  const panel = findLayoutNode(root, "panel");
+  if (!panel || panel.hidden) return false;
+  const body = findLayoutNode(root, "panel-body");
+  return !body || body.active === "changes";
+}
+
+function parsePorcelain(stdout) {
+  const entries = (stdout || "").split("\0").filter(Boolean);
+  const shown = entries.slice(0, 1000);
+  const staged = [];
+  const unstaged = [];
+  const uniquePaths = new Set();
+
+  for (const entry of shown) {
+    const x = entry[0], y = entry[1], path = entry.slice(3);
+    if (!path) continue;
+    uniquePaths.add(path);
+    if (x === "?" && y === "?") {
+      unstaged.push({ path, status: "U", untracked: true, staged: false });
+      continue;
+    }
+    if (x !== " " && x !== "?") {
+      staged.push({ path, status: x, untracked: false, staged: true });
+    }
+    if (y !== " " && y !== "?") {
+      unstaged.push({ path, status: y, untracked: false, staged: false });
+    }
+  }
+  return { staged, unstaged, limited: entries.length > 1000, count: uniquePaths.size };
+}
 
 async function repoStatus(root, on, { after, visiting, urgent, allowInactive }, cx, current) {
   const repo = JSON.stringify([on, root]), now = Date.now();
-  for (const [key, scan] of scans) {
-    if (scan.pollAt <= now || (!scan.pollAt && scan.task.is_done())) scans.delete(key);
+  for (const [k, scan] of scans) {
+    if (scan.pollAt <= now || (!scan.pollAt && scan.task.is_done())) scans.delete(k);
+  }
+  while (scans.size > MAX_SCANS) {
+    scans.delete(scans.keys().next().value);
   }
   while (current()) {
     let scan = scans.get(repo);
     const pending = scan && !scan.pollAt && !scan.task.is_done();
-    const reusable = scan?.status?.code === 0 && Date.now() < scan.pollAt
+    const reusable = scan?.ok && Date.now() < scan.pollAt
       && (scan.started >= after || (!urgent && Date.now() < scan.watchAt));
     if (!reusable && (!pending || (visiting && scan.started !== undefined && scan.started < after))) {
       if (!allowInactive && window()?.active === false) return null;
@@ -24,7 +76,10 @@ async function repoStatus(root, on, { after, visiting, urgent, allowInactive }, 
         if (!allowInactive && window()?.active === false) return;
         next.started = Date.now();
         try {
-          next.status = await exec("git", ["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"], { cwd: root, on });
+          const r = await exec("git", ["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"], { cwd: root, on });
+          next.ok = r.code === 0;
+          if (next.ok) next.parsed = parsePorcelain(r.stdout);
+          else next.stderr = r.stderr;
         } catch (error) {
           next.error = error;
         } finally {
@@ -32,7 +87,7 @@ async function repoStatus(root, on, { after, visiting, urgent, allowInactive }, 
           const delay = duration < 500 ? 0 : Math.min(60000, 5 * duration);
           next.watchAt = finished + delay;
           next.pollAt = finished + Math.max(10000, delay);
-          if (next.status?.code !== 0 && scans.get(repo) === next) scans.delete(repo);
+          if (!next.ok && scans.get(repo) === next) scans.delete(repo);
         }
       });
       scans.set(repo, next);
@@ -54,7 +109,7 @@ function location() {
     ? allPanes.find(p => p.tab === f.tab && p.cwd)
     : null;
   const on = f?.pane === null ? (f.terminal?.includes("/") ? f.terminal.split("/")[0] : null) : space?.machine ?? null;
-  return { cwd: pane?.cwd || fallbackTermPane?.cwd || f?.cwd || space?.folder, on };
+  return { cwd: pane?.cwd || fallbackTermPane?.cwd || f?.cwd || space?.folder, on, space: space?.id ?? null };
 }
 const key = () => JSON.stringify(location());
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
@@ -96,25 +151,26 @@ export default class ChangesHistory extends View {
   init(initialProps, cx) {
     const p = (initialProps && Object.keys(initialProps).length ? initialProps : null) ?? props();
     this.standaloneCommit = Boolean(p?.commit && p?.root);
+    this.standaloneFileDiff = Boolean(p?.fileDiff && p?.root);
+    this.standalone = this.standaloneCommit || this.standaloneFileDiff;
+    this.standaloneFile = this.standaloneFileDiff ? p.fileDiff : null;
     this.branch = "";
     this.staged = [];
     this.unstaged = [];
     this.stashes = [];
-    this.open = null; // { path, staged }
+    this.open = null;
     this.rows = [];
     this.longest = 0;
     this.gutterChars = 4;
     this.message = "";
     this.handle = cx.focus_handle();
 
-    // Collapsible VS Code sections
     this.secStaged = true;
     this.secChanges = true;
     this.secStashes = false;
     this.secGraph = false;
     this.hoveredRow = null;
 
-    // Commit history state
     this.commits = [];
     this.historyLimit = 50;
     this.historyLoading = false;
@@ -128,7 +184,16 @@ export default class ChangesHistory extends View {
     this.commitGutterChars = 4;
     this.commitDetailLoading = false;
 
-    if (!this.standaloneCommit) {
+    this.hiddenSince = 0;
+    this.evicted = false;
+    this.hibernated = false;
+    this.lastGcSeq = shared("herdr.gc")?.seq ?? 0;
+    this.lastBadgeAt = 0;
+    this.lastBadgeLoc = "";
+    this.badgeChecking = false;
+    this.standalonePaneId = null;
+
+    if (!this.standalone) {
       this.input = InputState.new({ placeholder: "Message (Enter to commit)" });
       this.input.on("change", (_e, cx) => {
         const hadMessage = Boolean(this.message.trim());
@@ -146,22 +211,163 @@ export default class ChangesHistory extends View {
       this.on = p.on ?? null;
       this.context = { key: `commit:${p.commit.hash}`, on: this.on, dirtyAt: 0 };
       this.openCommit(p.commit, cx);
+      cx.timer.every(15_000, cx => this.checkStandaloneHibernation(cx));
       return;
     }
-    this.refresh(cx);
-    cx.timer.every(500, cx => this.refreshIfDue(cx));
+    if (this.standaloneFileDiff) {
+      this.root = p.root;
+      this.on = p.on ?? null;
+      this.context = { key: `filediff:${p.fileDiff.path}`, on: this.on, dirtyAt: 0 };
+      this.open = { path: p.fileDiff.path, staged: Boolean(p.fileDiff.staged) };
+      this.loadStandaloneFileDiff(cx);
+      cx.timer.every(15_000, cx => this.checkStandaloneHibernation(cx));
+      return;
+    }
+    if (isChangesPanelVisible()) this.refresh(cx);
+    else this.refreshBadgeCount(cx);
+    cx.timer.every(1000, cx => this.refreshIfDue(cx));
   }
 
   close() {
     this.context?.watch?.pending?.cancel();
+    this.evictCaches();
     this.input?.release();
   }
 
+  publishBadgeCount(count, spaceId) {
+    const prev = shared("changes.badge") ?? {};
+    if (prev.count === count && prev.space === spaceId) return;
+    setShared("changes.badge", { count, space: spaceId });
+  }
+
+  refreshBadgeCount(cx) {
+    if (this.badgeChecking || window()?.active === false) return;
+    const loc = location();
+    if (!loc.cwd) {
+      this.publishBadgeCount(0, loc.space);
+      return;
+    }
+    const locKey = `${loc.space}:${loc.on ?? ""}:${loc.cwd}`;
+    const now = Date.now();
+    if (locKey === this.lastBadgeLoc && now - this.lastBadgeAt < HIDDEN_BADGE_POLL_MS) return;
+    this.lastBadgeLoc = locKey;
+    this.lastBadgeAt = now;
+    this.badgeChecking = true;
+    cx.spawn(async () => {
+      try {
+        const r = await exec(
+          "git",
+          [...READ, "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"],
+          { cwd: loc.cwd, on: loc.on, timeout: 5000 },
+        );
+        if (r.code !== 0) {
+          this.publishBadgeCount(0, loc.space);
+          return;
+        }
+        const unique = new Set();
+        for (const entry of (r.stdout || "").split("\0")) {
+          if (entry.length > 3) unique.add(entry.slice(3));
+          if (unique.size >= 999) break;
+        }
+        this.publishBadgeCount(unique.size, loc.space);
+      } catch {
+        // Ignore transient errors while hidden
+      } finally {
+        this.badgeChecking = false;
+      }
+    });
+  }
+
+  evictCaches() {
+    this.context?.watch?.pending?.cancel();
+    if (this.context) this.context.watch = null;
+    this.open = null;
+    this.setLines([]);
+    this.commits = [];
+    this.historyLimit = 50;
+    this.historyLoadedFor = null;
+    this.selectedCommit = null;
+    this.commitFiles = [];
+    this.commitOpenFile = null;
+    this.setCommitLines([]);
+    scans.clear();
+    releaseIconCache();
+    this.evicted = true;
+  }
+
+  isStandaloneVisible() {
+    if (window()?.visible === false) return false;
+    const activeSpace = spaces().find(s => s.active);
+    const activeTabId = activeSpace?.tabs?.find(t => t.active)?.id;
+    if (!activeTabId) return false;
+    const allPanes = panes().filter(p => p.mod === "changes-history");
+    if (!this.standalonePaneId) {
+      const match = allPanes.find(p => p.focused) ?? allPanes.find(p => p.tab === activeTabId);
+      if (match) this.standalonePaneId = match.pane;
+    }
+    if (!this.standalonePaneId) return true;
+    const me = allPanes.find(p => p.pane === this.standalonePaneId);
+    return Boolean(me && me.tab === activeTabId);
+  }
+
+  checkStandaloneHibernation(cx) {
+    const gcSeq = shared("herdr.gc")?.seq ?? 0;
+    const forceGc = gcSeq !== this.lastGcSeq;
+    this.lastGcSeq = gcSeq;
+
+    if (this.isStandaloneVisible()) {
+      this.hiddenSince = 0;
+      if (this.hibernated) {
+        this.hibernated = false;
+        if (this.standaloneCommit && this.selectedCommit) this.openCommit(this.selectedCommit, cx);
+        else if (this.standaloneFileDiff && this.standaloneFile) this.loadStandaloneFileDiff(cx);
+      }
+      return;
+    }
+
+    const now = Date.now();
+    if (!this.hiddenSince) this.hiddenSince = now;
+    if (forceGc || now - this.hiddenSince >= HIBERNATE_IDLE_MS) {
+      if (!this.hibernated) {
+        this.hibernated = true;
+        this.commitFiles = [];
+        this.setCommitLines([]);
+        this.setLines([]);
+        releaseIconCache();
+        cx.notify();
+      }
+    }
+  }
+
   refreshIfDue(cx) {
+    const gcSeq = shared("herdr.gc")?.seq ?? 0;
+    const forceGc = gcSeq !== this.lastGcSeq;
+    this.lastGcSeq = gcSeq;
+
+    const visible = isChangesPanelVisible();
+    if (!visible) {
+      this.context?.watch?.pending?.cancel();
+      if (this.context) this.context.watch = null;
+      const now = Date.now();
+      if (!this.hiddenSince) this.hiddenSince = now;
+      if (forceGc || (!this.evicted && now - this.hiddenSince >= IDLE_CLEAN_MS)) {
+        this.evictCaches();
+      }
+      this.refreshBadgeCount(cx);
+      return;
+    }
+
+    const wasEvicted = this.evicted;
+    this.hiddenSince = 0;
+    this.evicted = false;
+
     const active = window()?.active !== false, context = this.context;
     const refocused = active && this.windowActive === false;
     this.windowActive = active;
-    if (!context) return;
+    if (!context || wasEvicted) {
+      this.refresh(cx, true);
+      return;
+    }
     if (refocused && (context.dirtyAt || !context.watch)) context.catchUp = true;
     if (!active || this.loading || this.busy) return;
     const now = Date.now();
@@ -190,7 +396,7 @@ export default class ChangesHistory extends View {
   }
 
   current(context) {
-    if (this.standaloneCommit) return this.context === context;
+    if (this.standalone) return this.context === context;
     return this.context === context && key() === context.key;
   }
 
@@ -273,34 +479,16 @@ export default class ChangesHistory extends View {
         ]);
         if (!scan || !this.current(context)) return;
 
-        const { status, started, pollAt, watchAt } = scan;
+        const { started, pollAt, watchAt } = scan;
         context.lastStatus = started;
         context.pollAt = pollAt;
         context.watchAt = watchAt;
         if (context.dirtyAt <= started) context.dirtyAt = 0;
         if (scan.error) throw scan.error;
-        if (status.code !== 0) throw new Error(status.stderr);
+        if (!scan.ok) throw new Error(scan.stderr || "git status failed");
         if (request.urgent && request.after > started) context.catchUp = true;
 
-        const entries = status.stdout.split("\0").filter(Boolean);
-        const shown = entries.slice(0, 1000);
-        const staged = [];
-        const unstaged = [];
-
-        for (const entry of shown) {
-          const x = entry[0], y = entry[1], path = entry.slice(3);
-          if (!path) continue;
-          if (x === "?" && y === "?") {
-            unstaged.push({ path, status: "U", untracked: true, staged: false });
-            continue;
-          }
-          if (x !== " " && x !== "?") {
-            staged.push({ path, status: x, untracked: false, staged: true });
-          }
-          if (y !== " " && y !== "?") {
-            unstaged.push({ path, status: y, untracked: false, staged: false });
-          }
-        }
+        const { staged, unstaged, limited, count } = scan.parsed;
 
         const stashes = [];
         if (stashRes.code === 0) {
@@ -318,8 +506,9 @@ export default class ChangesHistory extends View {
         this.staged = staged;
         this.unstaged = unstaged;
         this.stashes = stashes;
-        this.limited = entries.length > 1000;
+        this.limited = limited;
         this.error = null;
+        this.publishBadgeCount(count, location().space);
 
         if (this.open) {
           const list = this.open.staged ? staged : unstaged;
@@ -437,7 +626,7 @@ export default class ChangesHistory extends View {
       else if (text.includes("\0")) lines = ["Binary file · no text diff"];
       else {
         const count = countLines(text);
-        lines = [`@@ -0,0 +1,${count} @@`, ...text.slice(0, 400000).replace(/\n$/, "").split("\n").slice(0, 1500).map(l => `+${l}`)];
+        lines = [`@@ -0,0 +1,${count} @@`, ...text.slice(0, 250000).replace(/\n$/, "").split("\n").slice(0, MAX_DIFF_LINES).map(l => `+${l}`)];
       }
     } else {
       const args = target.staged
@@ -451,8 +640,70 @@ export default class ChangesHistory extends View {
     }
 
     if (this.current(context) && this.open?.path === target.path && this.open?.staged === target.staged) {
-      this.setLines(lines.slice(0, 1500).map(l => l.length > 4000 ? l.slice(0, 4000) + "…" : l));
+      this.setLines(lines.slice(0, MAX_DIFF_LINES).map(l => l.length > MAX_DIFF_LINE_CHARS ? l.slice(0, MAX_DIFF_LINE_CHARS) + "…" : l));
     }
+  }
+
+  openFileDiffInNewTab(file) {
+    if (!file || !this.root) return;
+    const plainFile = {
+      path: file.path,
+      staged: Boolean(file.staged),
+      untracked: Boolean(file.untracked),
+      status: file.status || "M",
+    };
+    const fileName = file.path.split("/").pop() || file.path;
+    const tabTitle = `${plainFile.staged ? "Staged: " : ""}${fileName}`.slice(0, 32);
+    const res = run("tab.new", {
+      name: tabTitle,
+      mod: "changes-history",
+      props: { fileDiff: plainFile, root: this.root, on: this.on ?? null },
+    });
+    if (res?.pane) {
+      run("pane.rename", { pane: res.pane, name: `${plainFile.staged ? "Staged · " : "Diff · "}${file.path}` });
+    }
+  }
+
+  loadStandaloneFileDiff(cx) {
+    const file = this.standaloneFile;
+    if (!file || !this.root) return;
+    const context = this.context, root = this.root, on = this.on;
+    this.loading = true;
+    this.setLines([]);
+    cx.spawn(async cx => {
+      try {
+        let lines;
+        if (file.untracked) {
+          const text = await readTextFile(`${root}/${file.path}`, { on }).catch(() => null);
+          if (text === null) lines = ["Cannot preview this file"];
+          else if (text.includes("\0")) lines = ["Binary file · no text diff"];
+          else {
+            const count = countLines(text);
+            lines = [`@@ -0,0 +1,${count} @@`, ...text.slice(0, 250000).replace(/\n$/, "").split("\n").slice(0, MAX_DIFF_LINES).map(l => `+${l}`)];
+          }
+        } else {
+          const args = file.staged
+            ? [...READ, "diff", "--cached", "--no-ext-diff", "--no-textconv", "--no-color", "--", file.path]
+            : [...READ, "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--", file.path];
+          const r = await exec("git", args, { cwd: root, on, timeout: 8000 });
+          if (r.code !== 0) throw new Error(r.stderr || "Cannot load diff");
+          const all = (r.stdout || "").replace(/\n$/, "").split("\n");
+          const first = all.findIndex(l => l.startsWith("@@"));
+          lines = first < 0 ? ["Binary file or empty diff"] : all.slice(first);
+        }
+        if (this.current(context)) {
+          this.setLines(lines.slice(0, MAX_DIFF_LINES).map(l => l.length > MAX_DIFF_LINE_CHARS ? l.slice(0, MAX_DIFF_LINE_CHARS) + "…" : l));
+        }
+      } catch (e) {
+        if (this.current(context)) this.setLines([`Diff error: ${e}`]);
+      } finally {
+        if (this.current(context)) {
+          this.loading = false;
+          cx.notify();
+        }
+      }
+    });
+    cx.notify();
   }
 
   pickDiff(file, cx) {
@@ -625,7 +876,7 @@ export default class ChangesHistory extends View {
     const all = (r.stdout || "").replace(/\n$/, "").split("\n");
     const first = all.findIndex(l => l.startsWith("@@"));
     const lines = first < 0 ? ["Binary file or empty diff"] : all.slice(first);
-    this.setCommitLines(lines.slice(0, 1500).map(l => l.length > 4000 ? l.slice(0, 4000) + "…" : l));
+    this.setCommitLines(lines.slice(0, MAX_DIFF_LINES).map(l => l.length > MAX_DIFF_LINE_CHARS ? l.slice(0, MAX_DIFF_LINE_CHARS) + "…" : l));
   }
 
   pickCommitFile(path, cx) {
@@ -734,7 +985,14 @@ export default class ChangesHistory extends View {
         else if (this.hoveredRow === rowId) this.hoveredRow = null;
         cx.notify();
       })
-      .on_click((_e, cx) => this.pickDiff(file, cx))
+      .tooltip(`${file.path}\nClick: inline diff · Ctrl+Click: open diff in new tab`)
+      .on_click((e, cx) => {
+        if (e?.modifiers?.control || e?.modifiers?.platform) {
+          this.openFileDiffInNewTab(file);
+        } else {
+          this.pickDiff(file, cx);
+        }
+      })
       .child(image(fileIcon(name)).w(16).h(16).flex_none())
       .child(div().flex_none().max_w(165).truncate().text_size(12).text_color(t.foreground).child(name))
       .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(dir))
@@ -857,9 +1115,67 @@ export default class ChangesHistory extends View {
       );
   }
 
+  renderStandaloneFileDiff(t, size) {
+    const file = this.standaloneFile;
+    const name = file.path.split("/").pop() || file.path;
+    return v_flex()
+      .id("changes-filediff-tab")
+      .size_full()
+      .min_h(0)
+      .bg(t.background)
+      .text_color(t.foreground)
+      .text_size(13)
+      .child(
+        h_flex()
+          .h(34)
+          .flex_none()
+          .px(12)
+          .gap(7)
+          .items_center()
+          .border_b(1)
+          .border_color(t.border)
+          .child(image(fileIcon(name)).w(16).h(16).flex_none())
+          .child(div().px(5).py(1).rounded(4).bg(t.surface).text_size(10.5).font_semibold().text_color(statusColor(file.status, t)).child(file.staged ? `Staged · ${file.status}` : file.status))
+          .child(div().flex_1().min_w(0).truncate().font_medium().text_size(12).text_color(t.foreground).child(file.path))
+          .child(this.actionBtn(t, "sfd-refresh", "↻", "Refresh diff", (_e, cx) => this.loadStandaloneFileDiff(cx)))
+          .child(this.actionBtn(t, "sfd-open", "↗", "Open full file", (e) => this.openInViewer(file.path, e))),
+      )
+      .child(
+        div()
+          .flex_1()
+          .min_h(0)
+          .relative()
+          .font_family(settings().font_family ?? "JetBrains Mono")
+          .text_size(size)
+          .child(
+            div()
+              .id("sfd-diff-x")
+              .size_full()
+              .overflow_x_scrollbar()
+              .child(
+                div()
+                  .w_full()
+                  .min_w(Math.max(300, this.longest * charWidth(size) + this.gutter(this.gutterChars, size) + 20))
+                  .h_full()
+                  .child(
+                    v_virtual_list(
+                      "sfd-diff",
+                      this.rows.length,
+                      rowHeight(size),
+                      (i) => String(i),
+                      (range) => this.rows.slice(range.start, range.end).map((row) => this.diffRow(row, t, size, this.gutterChars)),
+                    ).size_full(),
+                  ),
+              ),
+          )
+          .child(Scrollbar.vertical("sfd-diff").viewport_from_layout().absolute().inset_0()),
+      );
+  }
+
   render(cx) {
     const t = theme(), size = settings().font_size;
     if (this.standaloneCommit && this.selectedCommit) {
+      if (!checking()) this.checkStandaloneHibernation(cx);
       return v_flex()
         .id("changes-commit-tab")
         .size_full()
@@ -869,8 +1185,12 @@ export default class ChangesHistory extends View {
         .text_size(13)
         .child(this.renderCommitDetail(t, size));
     }
+    if (this.standaloneFileDiff && this.standaloneFile) {
+      if (!checking()) this.checkStandaloneHibernation(cx);
+      return this.renderStandaloneFileDiff(t, size);
+    }
     if (!checking()) {
-      if (key() !== this.context?.key) this.refresh(cx);
+      if (isChangesPanelVisible() && key() !== this.context?.key) this.refresh(cx);
       else this.refreshIfDue(cx);
     }
     const totalChanges = this.staged.length + this.unstaged.length;
@@ -1069,7 +1389,14 @@ export default class ChangesHistory extends View {
                       .border_color(t.border)
                       .child(this.sectionHeader(t, "sec-graph", "Graph", this.secGraph, this.commits.length || null, (_e, cx) => {
                         this.secGraph = !this.secGraph;
-                        if (this.secGraph && this.historyLoadedFor !== this.root && !this.historyLoading) {
+                        if (!this.secGraph) {
+                          this.commits = [];
+                          this.historyLimit = 50;
+                          this.historyLoadedFor = null;
+                          cx.notify();
+                          return;
+                        }
+                        if (this.historyLoadedFor !== this.root && !this.historyLoading) {
                           this.loadHistory(cx, true);
                         } else {
                           cx.notify();
@@ -1113,7 +1440,7 @@ export default class ChangesHistory extends View {
                               .child(div().flex_none().text_size(10.5).text_color(t.dim).child(c.shortHash)),
                           ),
                         )
-                        .when(this.commits.length >= this.historyLimit && !this.historyLoading, el =>
+                        .when(this.commits.length >= this.historyLimit && this.historyLimit < MAX_HISTORY_LIMIT && !this.historyLoading, el =>
                           el.child(
                             div()
                               .id("hist-load-more")
@@ -1128,7 +1455,7 @@ export default class ChangesHistory extends View {
                               .cursor_pointer()
                               .hover(s => s.bg(t.hover).text_color(t.foreground))
                               .on_click((_e, cx) => {
-                                this.historyLimit += 50;
+                                this.historyLimit = Math.min(MAX_HISTORY_LIMIT, this.historyLimit + 50);
                                 this.loadHistory(cx, false);
                               })
                               .child("Load 50 more commits"),

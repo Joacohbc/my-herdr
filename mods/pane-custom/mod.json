@@ -4,5 +4,19 @@
   "cloned_from": {
     "name": "pane",
     "version": "0.1.18"
-  }
+  },
+  "palette": [
+    {
+      "title": "Close tab (save to history)",
+      "command": "pane-custom.close_tab",
+      "group": "Tab",
+      "words": "close tab ctrl-w"
+    },
+    {
+      "title": "Reopen closed tab",
+      "command": "pane-custom.reopen_tab",
+      "group": "Tab",
+      "words": "reopen restore undo tab ctrl-shift-t"
+    }
+  ]
 }

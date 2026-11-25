@@ -45,42 +45,38 @@ Para el inventario completo de archivos, mods, repositorios de iconos y arquitec
   - Los iconos deben renderizarse con `image(...)` a **16×16 px** (15×15 en cabeceras compactas) para mantener nitidez exacta.
 
 ### Visor de archivos (`file-viewer`)
-- **Preview de Markdown (`.md`, `.markdown`, `.mdx`):**
-  - Debe abrir por defecto en vista renderizada usando `TextView.markdown(...)` con `.selectable(true)`, `.scrollable(true)` y `.raw_html(false)`.
-  - Si se abre desde un resultado de búsqueda con línea/columna, resaltar el rango con `.highlight_range(...)`.
-  - Incluir botón `Preview` / `Raw` para alternar al código fuente con syntax highlighting.
+- **Previsualizaciones ricas con bajo uso de RAM:**
+  - **Markdown (`.md`, `.markdown`, `.mdx`):** vista renderizada con `TextView.markdown` (`.selectable(true)`, `.scrollable(true)`, `.raw_html(false)`) y resaltado `.highlight_range(...)`.
+  - **Imágenes (`.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.bmp`, `.ico`, `.svg`, `.avif`):** preview en vivo vía symlink/staging temporal en `data/fv-preview/` con zoom interactivo y toggle `Preview` / `Raw` en `.svg`.
+  - **CSV / TSV (`.csv`, `.tsv`):** tabla virtualizada estilo Excel (`v_virtual_list`, letras de columna `A, B, C...`, filas numeradas, autodetección de delimitador `,` / `;` / `\t`, hasta 5.000 filas × 60 cols) con toggle `Preview` / `Raw`.
+  - **PDF (`.pdf`):** renderizado perezoso **página a página** (`pdfinfo` + `pdftoppm`, manteniendo solo 1 PNG activo en disco/RAM) con navegación `← Prev` / `Next →` y zoom.
+- **Optimización RAM y limpieza automática:**
+  - Buffer único (no mantiene `EditorState` + `rawText` duplicados; usa `Uint32Array` de saltos de línea para código).
+  - Hibernación automática tras 45 s en tabs inactivas o ante señal `herdr.gc` (libera `EditorState`, texto, tabla CSV y archivos temporales `data/fv-preview/`, recargando al volver a la tab).
 - **Zoom interactivo:**
-  - Soportar **`Ctrl + ruedita del mouse`** y gesto **pinch** para ajustar el tamaño de fuente del visor (`fontDelta`), además de los botones `A−`, reset (`px`) y `A+`.
-  - Incluir botón `Zoom` / `Unzoom` (`pane.zoom`), `Wrap` (en modo código) y cerrar (`×`).
+  - Soportar **`Ctrl + ruedita del mouse`** y gesto **pinch** para ajustar el tamaño de fuente / escala del visor (`fontDelta`), además de los botones `−`, `%` y `+` en `pane-custom`.
 
-### Encabezado unificado de paneles (`pane-custom`) y Visor (`file-viewer`)
-- Todos los controles del visor (`Preview`/`Raw`, `Wrap`, `−` / `%` / `+`, `pane.zoom`, split y `×`) deben vivir **en la única barra superior de `pane-custom`** sin duplicar barras en `file-viewer`.
+### Encabezado unificado de paneles (`pane-custom`) y Barra de Tabs (`tabs-custom`)
+- Todos los controles del visor (`Preview`/`Raw`, `Wrap`, `−` / `%` / `+`, `pane.zoom`, split y `×`) viven **en la única barra superior de `pane-custom`** sin duplicar barras en `file-viewer`.
 - En paneles `file-viewer`, `−` / `%` / `+` y `Ctrl + ruedita` ajustan el zoom del visor (`fontDelta` vía `shared("file-viewer.cmd")`); en terminales ajustan `app.zoom_out` / `app.zoom_reset` / `app.zoom_in`.
-- `pane-custom` también escucha `nextCommand()` en el panel enfocado para cerrar y reabrir panes/tabs con historial (`close_pane`, `reopen_pane`, `close_tab`, `reopen_tab`).
+- `tabs-custom` muestra un **puntito con contador** en el botón `Changes` arriba a la derecha cuando hay cambios sin commitear (`shared("changes.badge")`).
 
-### Atajos de Tabs (`scripts/apply-keys.js`)
-- `Ctrl + T`: crear nueva tab (`tab.new`).
-- `Ctrl + W`: cerrar tab actual guardándola en el historial (`pane-custom.close_tab`).
-- `Ctrl + Shift + T`: reabrir última tab cerrada (`pane-custom.reopen_tab`).
-- Aplicados en `"layout:my-herdr"` y `"terminal"` dentro de `~/.config/herdr-app/keys.json`.
+### Atajos de Teclado (`scripts/apply-keys.js`)
+- Navegación de paneles con flechas: `Alt + ←/↓/↑/→` (`pane.go:{left,down,up,right}`) y `Alt + Shift + ←/↓/↑/→` (`pane.swap:{left,down,up,right}`), reemplazando `hjkl`.
+- Tabs: `Ctrl + T` (`tab.new`), `Ctrl + W` (`pane-custom.close_tab`), `Ctrl + Shift + T` (`pane-custom.reopen_tab`).
+- Sincronizados en `"global"`, `"layout:my-herdr"` y `"terminal"` dentro de `~/.config/herdr-app/keys.json` (y expuestos en `pane-custom/mod.json` `palette`) para que el menú `Ctrl + Shift + P` muestre siempre las asignaciones actuales.
 
 ### Panel de cambios, Stash e historial Git estilo VS Code (`changes-history`)
 - Diseño estilo **VS Code Source Control**:
-  - Caja de mensaje + botón ancho `✓ Commit` en la parte superior (hace commit solo de staged si existen, o stagea todo y commitea si no hay staged) + barra de acciones rápidas (`S+` Stash, `↓` Pull, `↑` Push, `↻` Refresh).
-  - Secciones colapsables: **Staged Changes** (con `−` Unstage / Unstage All), **Changes** (con iconos Material Icons 16×16, abrir en `file-viewer` `↗`, `↺` Discard y `+` Stage / Stage All), **Stashes** (`+` crear stash con `-u`, `Apply`, `Pop`, `×` Drop) y **Graph** (historial de commits `git log`, clic para abrir archivos modificados y diff virtualizado con `git show`).
+  - Caja de mensaje + botón ancho `✓ Commit` + barra de acciones rápidas (`S+` Stash, `↓` Pull, `↑` Push, `↻` Refresh).
+  - **`Ctrl + clic`** tanto en archivos de `Changes` / `Staged Changes` como en commits de `Graph` abre el diff dedicado en una **nueva tab** (con hibernación automática si queda en segundo plano).
+  - Limpieza automática: pausa `watchFolder` y libera diffs, commits e iconos cuando el panel está oculto o al colapsar `Graph`, manteniendo solo el contador liviano del badge.
 
 ### Monitor de sistema en el lateral izquierdo (`system-monitor`)
-- Mostrar **CPU total** y **RAM total** (uso / total / % con barra de color dinámico) + **procesos agrupados por aplicación** ordenables por `RAM` o `CPU`.
-- **Modo minimizado (rail colapsado `< 140 px`):**
-  - Mostrar resumen `C % / R %` (clic para alternar orden `RAM` / `CPU`).
-  - Mostrar cada app principal por su **icono SVG** con **color de fondo y borde de alerta** según el % del total de RAM/CPU que consume esa app (`<4%` neutro, `4–10%` acento, `10–20%` advertencia, `≥20%` alerta roja) y su porcentaje debajo.
-- **Iconos a color y nítidos (16×16 px):**
-  - Nunca usar iconos monocromáticos negros con `image(...)` sobre fondo oscuro.
-  - **Java:** usar la tacita clásica azul con vapor naranja (`mods/system-monitor/icons/java.svg`).
-  - **Docker:** usar la ballena azul clásica.
-  - **Lenguajes/runtimes:** usar SVGs optimizados a 16/32 px a color (Material Icons / Devicon).
-  - **Apps de escritorio:** usar SVGs a color (Papirus-Dark / logos oficiales).
-- Pausar el polling cuando `window()?.visible === false`.
+- Mostrar **CPU total**, **RAM total** y **procesos agrupados por aplicación** con **atribución profunda por árbol de procesos (`pid`/`ppid`)**: procesos hijos/subprocesos cargados en profundidad se agrupan bajo su app raíz con indicador `+N` y desglose expandible al hacer clic.
+- **Limpieza automática cada 60 s (y botón manual `GC`):** elimina terminales finalizadas en `herdr-core` (`hc rm`), poda metadatos huérfanos en `shared` y dispara `herdr.gc` cuando la RAM ≥ 75% o bajo demanda.
+- **Modo minimizado (rail colapsado `< 140 px`):** resumen `C % / R %` + iconos SVG 16×16 con fondo y borde de alerta (`<4%` neutro, `4–10%` acento, `10–20%` advertencia, `≥20%` alerta roja).
+- Polling adaptativo (`3 s` activo, `8 s` sin foco, pausado si `window()?.visible === false`) con salida `ps`/`awk` compacta.
 
 ---
 

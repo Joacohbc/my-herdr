@@ -1,47 +1,45 @@
-// Live CPU & RAM monitor (total + grouped by application) with real SVG icons.
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { exec, theme, settings, window, checking } from "herdr";
+import { exec, hc, theme, settings, window, panes, shared, setShared, checking } from "herdr";
 
-const POLL_MS = 3000;
+const ACTIVE_POLL_MS = 3000;
+const UNFOCUSED_POLL_MS = 8000;
+const AUTO_CLEAN_MS = 60_000;
+const HIGH_RAM_GC_PCT = 75;
 const MAX_APPS = 16;
 
 const APP_RULES = [
-  // AI Agents & Herdr
-  { name: "Antigravity", icon: "icons/antigravity.svg", test: (c, a) => /antigravity|\bagy\b/.test(c) || /antigravity|\/agy(\s|$)/.test(a) },
-  { name: "Claude Code", icon: "icons/claude.svg", test: (c, a) => /^claude$/i.test(c) || /claude-code|\/claude(\s|$)/.test(a) },
-  { name: "Codex", icon: "icons/codex.svg", test: (c, a) => /^codex$/i.test(c) || /\/codex(\s|$)/.test(a) },
-  { name: "Gemini", icon: "icons/gemini.svg", test: (c, a) => /^gemini$/i.test(c) || /\/gemini-cli\//.test(a) },
-  { name: "Ollama", icon: "icons/ollama.svg", test: (c, a) => /^ollama/.test(c) || /ollama/.test(a) },
-  { name: "Herdr", icon: "mods/system-monitor/icons/herdr.svg", test: (c, a) => /^herdr(-app|-core)?$/.test(c) || /\/herdr(-app|-core)?(\s|$)/.test(a) },
+  { name: "Antigravity", icon: "icons/antigravity.svg", root: true, test: (c, a) => /antigravity|\bagy\b/.test(c) || /antigravity|\/agy(\s|$)/.test(a) },
+  { name: "Claude Code", icon: "icons/claude.svg", root: true, test: (c, a) => /^claude$/i.test(c) || /claude-code|\/claude(\s|$)/.test(a) },
+  { name: "Codex", icon: "icons/codex.svg", root: true, test: (c, a) => /^codex$/i.test(c) || /\/codex(\s|$)/.test(a) },
+  { name: "Gemini", icon: "icons/gemini.svg", root: true, test: (c, a) => /^gemini$/i.test(c) || /\/gemini-cli\//.test(a) },
+  { name: "Ollama", icon: "icons/ollama.svg", root: true, test: (c, a) => /^ollama/.test(c) || /ollama/.test(a) },
+  { name: "Herdr", icon: "mods/system-monitor/icons/herdr.svg", root: true, test: (c, a) => /^herdr(-app|-core)?$/.test(c) || /\/herdr(-app|-core)?(\s|$)/.test(a) },
 
-  // Editors & IDEs
-  { name: "VS Code", icon: "mods/system-monitor/icons/vscode.svg", test: (c, a) => /^(code|code-insiders|codium)$/.test(c) || /\/(code|vscode|vscodium|code-insiders)\//i.test(a) },
-  { name: "Cursor", icon: "icons/cursor.svg", test: (c, a) => /^cursor$/i.test(c) || /\/cursor\//i.test(a) },
+  { name: "VS Code", icon: "mods/system-monitor/icons/vscode.svg", root: true, test: (c, a) => /^(code|code-insiders|codium)$/.test(c) || /\/(code|vscode|vscodium|code-insiders)\//i.test(a) },
+  { name: "Cursor", icon: "icons/cursor.svg", root: true, test: (c, a) => /^cursor$/i.test(c) || /\/cursor\//i.test(a) },
   { name: "Neovim", icon: "mods/files-search/micons/vim.svg", test: (c) => /^nvim$/.test(c) },
   { name: "Vim", icon: "mods/files-search/micons/vim.svg", test: (c) => /^vim$/.test(c) },
 
-  // Browsers
-  { name: "Vivaldi", icon: "mods/system-monitor/icons/vivaldi.svg", test: (c, a) => /vivaldi/i.test(c) || /vivaldi/i.test(a) },
-  { name: "Brave", icon: "mods/system-monitor/icons/brave-browser.svg", test: (c, a) => /brave/i.test(c) || /brave-browser/i.test(a) },
-  { name: "Chrome", icon: "mods/system-monitor/icons/google-chrome.svg", test: (c, a) => /chrom(e|ium)/i.test(c) || /google-chrome|\/chromium|chrome-devtools/i.test(a) },
-  { name: "Firefox", icon: "mods/system-monitor/icons/firefox.svg", test: (c, a) => /firefox|isolated web co|web content|webextensions/i.test(c) || /firefox/i.test(a) },
+  { name: "Vivaldi", icon: "mods/system-monitor/icons/vivaldi.svg", root: true, test: (c, a) => /vivaldi/i.test(c) || /vivaldi/i.test(a) },
+  { name: "Brave", icon: "mods/system-monitor/icons/brave-browser.svg", root: true, test: (c, a) => /brave/i.test(c) || /brave-browser/i.test(a) },
+  { name: "Chrome", icon: "mods/system-monitor/icons/google-chrome.svg", root: true, test: (c, a) => /chrom(e|ium)/i.test(c) || /google-chrome|\/chromium|chrome-devtools/i.test(a) },
+  { name: "Firefox", icon: "mods/system-monitor/icons/firefox.svg", root: true, test: (c, a) => /firefox|isolated web co|web content|webextensions/i.test(c) || /firefox/i.test(a) },
 
-  // Popular Desktop Apps
-  { name: "Slack", icon: "mods/system-monitor/icons/slack.svg", test: (c, a) => /slack/i.test(c) || /\/slack\//i.test(a) },
-  { name: "Discord", icon: "mods/system-monitor/icons/discord.svg", test: (c, a) => /discord/i.test(c) || /discord/i.test(a) },
-  { name: "Spotify", icon: "mods/system-monitor/icons/spotify.svg", test: (c, a) => /spotify/i.test(c) || /spotify/i.test(a) },
-  { name: "Telegram", icon: "mods/system-monitor/icons/telegram.svg", test: (c, a) => /telegram/i.test(c) || /telegram/i.test(a) },
-  { name: "WhatsApp", icon: "mods/system-monitor/icons/whatsapp.svg", test: (c, a) => /whatsapp/i.test(c) || /whatsapp/i.test(a) },
-  { name: "Teams", icon: "mods/system-monitor/icons/teams.svg", test: (c, a) => /teams/i.test(c) || /teams-for-linux|ms-teams/i.test(a) },
-  { name: "Obsidian", icon: "mods/system-monitor/icons/obsidian.svg", test: (c, a) => /obsidian/i.test(c) || /obsidian/i.test(a) },
-  { name: "Postman", icon: "mods/system-monitor/icons/postman.svg", test: (c, a) => /postman/i.test(c) || /postman/i.test(a) },
-  { name: "DBeaver", icon: "mods/system-monitor/icons/dbeaver.svg", test: (c, a) => /dbeaver/i.test(c) || /dbeaver/i.test(a) },
+  { name: "Slack", icon: "mods/system-monitor/icons/slack.svg", root: true, test: (c, a) => /slack/i.test(c) || /\/slack\//i.test(a) },
+  { name: "Discord", icon: "mods/system-monitor/icons/discord.svg", root: true, test: (c, a) => /discord/i.test(c) || /discord/i.test(a) },
+  { name: "Spotify", icon: "mods/system-monitor/icons/spotify.svg", root: true, test: (c, a) => /spotify/i.test(c) || /spotify/i.test(a) },
+  { name: "Telegram", icon: "mods/system-monitor/icons/telegram.svg", root: true, test: (c, a) => /telegram/i.test(c) || /telegram/i.test(a) },
+  { name: "WhatsApp", icon: "mods/system-monitor/icons/whatsapp.svg", root: true, test: (c, a) => /whatsapp/i.test(c) || /whatsapp/i.test(a) },
+  { name: "Teams", icon: "mods/system-monitor/icons/teams.svg", root: true, test: (c, a) => /teams/i.test(c) || /teams-for-linux|ms-teams/i.test(a) },
+  { name: "Obsidian", icon: "mods/system-monitor/icons/obsidian.svg", root: true, test: (c, a) => /obsidian/i.test(c) || /obsidian/i.test(a) },
+  { name: "Postman", icon: "mods/system-monitor/icons/postman.svg", root: true, test: (c, a) => /postman/i.test(c) || /postman/i.test(a) },
+  { name: "DBeaver", icon: "mods/system-monitor/icons/dbeaver.svg", root: true, test: (c, a) => /dbeaver/i.test(c) || /dbeaver/i.test(a) },
   { name: "CopyQ", icon: "mods/system-monitor/icons/copyq.svg", test: (c) => /^copyq$/i.test(c) },
   { name: "Ulauncher", icon: "mods/system-monitor/icons/ulauncher.svg", test: (c, a) => /ulauncher/i.test(c) || /ulauncher/i.test(a) },
   { name: "OBS", icon: "mods/system-monitor/icons/obs.svg", test: (c) => /^obs$/i.test(c) },
   { name: "VLC", icon: "mods/system-monitor/icons/vlc.svg", test: (c) => /^vlc$/i.test(c) },
-  { name: "Steam", icon: "mods/system-monitor/icons/steam.svg", test: (c, a) => /^steam/i.test(c) || /\/steam\//i.test(a) },
+  { name: "Steam", icon: "mods/system-monitor/icons/steam.svg", root: true, test: (c, a) => /^steam/i.test(c) || /\/steam\//i.test(a) },
   { name: "Blender", icon: "mods/system-monitor/icons/blender.svg", test: (c) => /^blender$/i.test(c) },
   { name: "GIMP", icon: "mods/system-monitor/icons/gimp.svg", test: (c) => /^gimp/i.test(c) },
   { name: "Thunderbird", icon: "mods/system-monitor/icons/thunderbird.svg", test: (c) => /thunderbird/i.test(c) },
@@ -50,17 +48,14 @@ const APP_RULES = [
   { name: "Alacritty", icon: "mods/system-monitor/icons/Alacritty.svg", test: (c) => /^alacritty$/i.test(c) },
   { name: "Kitty", icon: "mods/system-monitor/icons/kitty.svg", test: (c) => /^kitty$/i.test(c) },
 
-  // Containers & Infrastructure
-  { name: "Docker", icon: "mods/files-search/micons/docker.svg", test: (c, a) => /^(dockerd|docker|containerd|buildkitd|docker-proxy)/.test(c) || /containerd|dockerd/.test(a) },
-  { name: "Podman", icon: "mods/system-monitor/icons/podman.svg", test: (c) => /^podman/.test(c) },
+  { name: "Docker", icon: "mods/files-search/micons/docker.svg", root: true, test: (c, a) => /^(dockerd|docker|containerd|buildkitd|docker-proxy|containerd-shim)/.test(c) || /containerd|dockerd/.test(a) },
+  { name: "Podman", icon: "mods/system-monitor/icons/podman.svg", root: true, test: (c) => /^podman/.test(c) },
 
-  // Databases
   { name: "Postgres", icon: "mods/system-monitor/icons/postgres.svg", test: (c) => /^(postgres|psql)$/.test(c) },
   { name: "MySQL", icon: "mods/system-monitor/icons/mysql.svg", test: (c) => /^(mysqld|mariadbd|mysql)$/.test(c) },
   { name: "MongoDB", icon: "mods/system-monitor/icons/mongodb.svg", test: (c) => /^(mongod|mongosh)$/.test(c) },
   { name: "Redis", icon: "mods/system-monitor/icons/redis.svg", test: (c) => /^redis/.test(c) },
 
-  // Programming Languages & Runtimes (Material Icons crisp 16/32px SVGs)
   { name: "Java", icon: "mods/system-monitor/icons/java.svg", test: (c) => /^(java|javac|gradle|mvn)$/.test(c) },
   { name: "Bun", icon: "mods/files-search/micons/bun.svg", test: (c) => /^bun$/.test(c) },
   { name: "Deno", icon: "mods/files-search/micons/deno.svg", test: (c) => /^deno$/.test(c) },
@@ -82,20 +77,20 @@ const APP_RULES = [
   { name: "tmux", icon: "icons/tmux.svg", tint: true, test: (c) => /^tmux/.test(c) },
 ];
 
+const GENERIC_HELPER = /^(mainthread|sh|bash|zsh|dash|node|npm|npx|python\d*|conmon|cat|tee|sleep|mcp-remote|chrome-devtools|utility)$/i;
+
 function classifyApp(comm, args) {
   const c = comm.toLowerCase();
   const a = args.toLowerCase();
   for (const rule of APP_RULES) {
-    if (rule.test(c, a)) return { name: rule.name, icon: rule.icon, tint: Boolean(rule.tint) };
+    if (rule.test(c, a)) return { name: rule.name, icon: rule.icon, tint: Boolean(rule.tint), root: Boolean(rule.root), matched: true };
   }
   const clean = comm.replace(/^\/.*\//, "").slice(0, 22);
-  return { name: clean || "other", icon: "icons/program.svg", tint: true };
+  return { name: clean || "other", icon: "icons/program.svg", tint: true, root: false, matched: false };
 }
 
 function renderAppIcon(app, t) {
-  if (app.tint) {
-    return svg(app.icon).size(16).flex_none().text_color(t.dim);
-  }
+  if (app.tint) return svg(app.icon).size(16).flex_none().text_color(t.dim);
   return image(app.icon).w(16).h(16).flex_none();
 }
 
@@ -127,39 +122,59 @@ function appAlertStyle(pct, t) {
 const SAMPLE_SCRIPT = `
 head -n 1 /proc/stat
 printf '===MEM===\\n'
-grep -E '^(MemTotal|MemAvailable):' /proc/meminfo
+grep -E '^(MemTotal|MemAvailable|SwapTotal|SwapFree):' /proc/meminfo
 printf '===CORES===\\n'
 nproc 2>/dev/null || echo 1
 printf '===PS===\\n'
-ps -eo pcpu=,rss=,comm=,args= --no-headers
+ps -eo pid=,ppid=,pcpu=,rss=,comm=,args= --no-headers | awk '$4 > 0 || $3+0 > 0 { cmd=substr($0, index($0,$6), 110); gsub(/\\t/, " ", cmd); printf "%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n", $1, $2, $3, $4, $5, cmd }'
 `;
 
 export default class SystemMonitor extends View {
   init(_props, cx) {
     this.sortBy = "ram";
     this.collapsed = false;
+    this.expandedApp = null;
     this.width = 268;
     this.prevCpu = null;
     this.cpuPct = 0;
     this.memUsedKb = 0;
     this.memTotalKb = 0;
     this.memPct = 0;
+    this.swapUsedKb = 0;
+    this.swapTotalKb = 0;
     this.cores = 1;
     this.apps = [];
     this.sampling = false;
+    this.cleaning = false;
+    this.lastPollAt = 0;
+    this.lastCleanAt = 0;
+    this.lastCleanSummary = "";
     this.error = null;
 
     if (checking()) return;
     this.sample(cx);
-    cx.timer.every(POLL_MS, cx => {
-      if (window()?.visible === false) return;
-      this.sample(cx);
+    cx.spawn(async cx => {
+      await cx.sleep(5000);
+      this.runAutoCleanup(cx, "startup");
+    });
+    cx.timer.every(ACTIVE_POLL_MS, cx => {
+      const w = window();
+      if (w?.visible === false) return;
+      const now = Date.now();
+      const interval = w?.active === false ? UNFOCUSED_POLL_MS : ACTIVE_POLL_MS;
+      if (now - this.lastPollAt >= interval - 100) {
+        this.sample(cx);
+      }
+      if (now - this.lastCleanAt >= AUTO_CLEAN_MS) {
+        this.runAutoCleanup(cx, this.memPct >= HIGH_RAM_GC_PCT ? "high-ram" : "auto");
+      }
     });
   }
 
   sample(cx) {
     if (this.sampling) return;
     this.sampling = true;
+    this.lastPollAt = Date.now();
     cx.spawn(async cx => {
       try {
         const r = await exec("sh", ["-c", SAMPLE_SCRIPT], { timeout: 4000 });
@@ -170,6 +185,54 @@ export default class SystemMonitor extends View {
         this.error = String(e.message || e);
       } finally {
         this.sampling = false;
+        cx.notify();
+      }
+    });
+  }
+
+  runAutoCleanup(cx, reason = "manual") {
+    if (this.cleaning) return;
+    this.cleaning = true;
+    this.lastCleanAt = Date.now();
+    cx.spawn(async cx => {
+      let removedTerminals = 0;
+      try {
+        const lsRes = await hc(["ls", "--all", "--json"]).catch(() => null);
+        if (lsRes?.code === 0 && lsRes.stdout) {
+          const parsed = JSON.parse(lsRes.stdout);
+          const finished = (parsed.terminals ?? []).filter(t => t.state === "finished" && t.address);
+          for (const term of finished.slice(0, 40)) {
+            const rm = await hc(["rm", term.address]).catch(() => null);
+            if (rm?.code === 0) removedTerminals++;
+          }
+        }
+
+        const meta = shared("file-viewer.meta");
+        if (meta && typeof meta === "object") {
+          const liveIds = new Set(panes().filter(p => p.mod === "file-viewer").map(p => p.pane));
+          const pruned = {};
+          let changed = false;
+          for (const [k, v] of Object.entries(meta)) {
+            if (liveIds.has(k)) pruned[k] = v;
+            else changed = true;
+          }
+          if (changed) setShared("file-viewer.meta", pruned);
+        }
+
+        if (reason === "manual" || reason === "high-ram" || removedTerminals > 0) {
+          const prevSeq = shared("herdr.gc")?.seq ?? 0;
+          setShared("herdr.gc", { seq: prevSeq + 1, at: Date.now(), reason });
+        }
+
+        if (removedTerminals > 0 || reason === "manual") {
+          this.lastCleanSummary = removedTerminals > 0
+            ? `Freed ${removedTerminals} finished term${removedTerminals === 1 ? "" : "s"} + caches`
+            : "Caches & inactive tabs trimmed";
+        }
+      } catch {
+        // Ignore cleanup errors
+      } finally {
+        this.cleaning = false;
         cx.notify();
       }
     });
@@ -194,50 +257,97 @@ export default class SystemMonitor extends View {
       this.prevCpu = { idle, total };
     }
 
-    let memTotal = 0;
-    let memAvail = 0;
+    let memTotal = 0, memAvail = 0, swapTotal = 0, swapFree = 0;
     for (const line of memSec.split("\n")) {
       const m = /^(\w+):\s+(\d+)/.exec(line);
       if (!m) continue;
       if (m[1] === "MemTotal") memTotal = Number(m[2]);
       else if (m[1] === "MemAvailable") memAvail = Number(m[2]);
+      else if (m[1] === "SwapTotal") swapTotal = Number(m[2]);
+      else if (m[1] === "SwapFree") swapFree = Number(m[2]);
     }
     if (memTotal > 0) {
       this.memTotalKb = memTotal;
       this.memUsedKb = Math.max(0, memTotal - memAvail);
       this.memPct = Math.max(0, Math.min(100, (this.memUsedKb / memTotal) * 100));
     }
-
+    this.swapTotalKb = swapTotal;
+    this.swapUsedKb = Math.max(0, swapTotal - swapFree);
     this.cores = Math.max(1, Number(coresSec.trim()) || 1);
 
-    const grouped = new Map();
+    const procByPid = new Map();
     for (const raw of psSec.split("\n")) {
-      const line = raw.trim();
-      if (!line) continue;
-      const m = /^([\d.]+)\s+(\d+)\s+(\S+)\s*(.*)$/.exec(line);
-      if (!m) continue;
-      const pcpu = parseFloat(m[1]) || 0;
-      const rss = parseInt(m[2], 10) || 0;
-      const comm = m[3];
-      const args = m[4] || comm;
-      if (rss === 0 && pcpu === 0) continue;
-
-      const info = classifyApp(comm, args);
-      let entry = grouped.get(info.name);
-      if (!entry) {
-        entry = { name: info.name, icon: info.icon, tint: info.tint, cpu: 0, rss: 0, count: 0 };
-        grouped.set(info.name, entry);
-      }
-      entry.cpu += pcpu;
-      entry.rss += rss;
-      entry.count += 1;
+      if (!raw) continue;
+      const parts = raw.split("\t");
+      if (parts.length < 5) continue;
+      const pid = parseInt(parts[0], 10);
+      const ppid = parseInt(parts[1], 10);
+      const pcpu = parseFloat(parts[2]) || 0;
+      const rss = parseInt(parts[3], 10) || 0;
+      const comm = parts[4];
+      const args = parts[5] || comm;
+      if (!pid || (rss === 0 && pcpu === 0)) continue;
+      procByPid.set(pid, { pid, ppid, pcpu, rss, comm, args, info: classifyApp(comm, args) });
     }
 
-    this.apps = [...grouped.values()].map(a => ({
-      ...a,
-      cpuNorm: Math.min(100, a.cpu / this.cores),
-      ramPct: this.memTotalKb > 0 ? Math.min(100, (a.rss / this.memTotalKb) * 100) : 0,
-    }));
+    const grouped = new Map();
+    for (const proc of procByPid.values()) {
+      let chosen = proc.info;
+      let depth = 0;
+      if (!chosen.root && (!chosen.matched || GENERIC_HELPER.test(proc.comm))) {
+        let cur = procByPid.get(proc.ppid);
+        let hops = 1;
+        while (cur && hops <= 6) {
+          if (cur.info.root) {
+            chosen = cur.info;
+            depth = hops;
+            break;
+          }
+          cur = procByPid.get(cur.ppid);
+          hops++;
+        }
+      }
+
+      let entry = grouped.get(chosen.name);
+      if (!entry) {
+        entry = {
+          name: chosen.name,
+          icon: chosen.icon,
+          tint: chosen.tint,
+          cpu: 0,
+          rss: 0,
+          count: 0,
+          maxDepth: 0,
+          deepCount: 0,
+          deepRss: 0,
+          subProcs: [],
+        };
+        grouped.set(chosen.name, entry);
+      }
+      entry.cpu += proc.pcpu;
+      entry.rss += proc.rss;
+      entry.count += 1;
+      if (depth > 0) {
+        entry.deepCount += 1;
+        entry.deepRss += proc.rss;
+        if (depth > entry.maxDepth) entry.maxDepth = depth;
+      }
+      if (this.expandedApp === chosen.name) {
+        entry.subProcs.push({ pid: proc.pid, comm: proc.comm, rss: proc.rss, depth });
+      }
+    }
+
+    this.apps = [...grouped.values()].map(a => {
+      if (a.subProcs.length > 1) {
+        a.subProcs.sort((x, y) => y.rss - x.rss);
+        a.subProcs = a.subProcs.slice(0, 6);
+      }
+      return {
+        ...a,
+        cpuNorm: Math.min(100, a.cpu / this.cores),
+        ramPct: this.memTotalKb > 0 ? Math.min(100, (a.rss / this.memTotalKb) * 100) : 0,
+      };
+    });
   }
 
   sortedApps() {
@@ -281,7 +391,8 @@ export default class SystemMonitor extends View {
     const sysCpuColor = barColor(this.cpuPct, t);
     const sysRamColor = barColor(this.memPct, t);
     const topApps = this.sortedApps().slice(0, 8);
-    const sysTip = `System · CPU ${formatPct(this.cpuPct)} (${this.cores} cores) · RAM ${this.memTotalKb ? `${formatMem(this.memUsedKb)} / ${formatMem(this.memTotalKb)} (${Math.round(this.memPct)}%)` : "…"} · Orden: ${this.sortBy.toUpperCase()} (clic para cambiar)`;
+    const swapNote = this.swapTotalKb ? ` · Swap ${formatMem(this.swapUsedKb)}/${formatMem(this.swapTotalKb)}` : "";
+    const sysTip = `System · CPU ${formatPct(this.cpuPct)} (${this.cores} cores) · RAM ${this.memTotalKb ? `${formatMem(this.memUsedKb)} / ${formatMem(this.memTotalKb)} (${Math.round(this.memPct)}%)` : "…"}${swapNote} · Orden: ${this.sortBy.toUpperCase()} (clic para cambiar)`;
 
     return v_flex()
       .size_full()
@@ -326,7 +437,8 @@ export default class SystemMonitor extends View {
               const alertPct = Math.max(app.ramPct, app.cpuNorm);
               const style = appAlertStyle(alertPct, t);
               const procLabel = app.count === 1 ? "1 proceso" : `${app.count} procesos`;
-              const tip = `${app.name} · RAM: ${formatMem(app.rss)} (${formatPct(app.ramPct)}) · CPU: ${formatPct(app.cpuNorm)} · ${procLabel}`;
+              const deepNote = app.deepCount > 0 ? ` · ${app.deepCount} hijos (${formatMem(app.deepRss)}, prof. ${app.maxDepth})` : "";
+              const tip = `${app.name} · RAM: ${formatMem(app.rss)} (${formatPct(app.ramPct)}) · CPU: ${formatPct(app.cpuNorm)} · ${procLabel}${deepNote}`;
               return v_flex()
                 .id(`sysmon-c-${app.name}`)
                 .w(32)
@@ -374,7 +486,7 @@ export default class SystemMonitor extends View {
               .h(34)
               .flex_none()
               .px(12)
-              .gap(6)
+              .gap(5)
               .items_center()
               .child(
                 div()
@@ -390,6 +502,21 @@ export default class SystemMonitor extends View {
                     cx.notify();
                   })
                   .child(this.collapsed ? "System ▸" : "System"),
+              )
+              .child(
+                div()
+                  .id("sysmon-gc")
+                  .px(5)
+                  .py(1)
+                  .rounded(4)
+                  .text_size(10.5)
+                  .font_semibold()
+                  .cursor_pointer()
+                  .text_color(this.cleaning ? t.accent : t.dim)
+                  .hover(s => s.bg(t.hover).text_color(t.foreground))
+                  .tooltip(this.lastCleanSummary ? `Clean RAM & finished terminals\n${this.lastCleanSummary}` : "Clean RAM caches & finished terminals (auto every 60s)")
+                  .on_click((_e, cx) => this.runAutoCleanup(cx, "manual"))
+                  .child(this.cleaning ? "…" : "GC"),
               )
               .child(
                 div()
@@ -460,48 +587,81 @@ export default class SystemMonitor extends View {
                   err.child(div().px(6).py(4).text_size(11).text_color(t.ansi1).child(this.error)),
                 )
                 .children(
-                  this.sortedApps().map(app => {
+                  this.sortedApps().flatMap(app => {
+                    const isExpanded = this.expandedApp === app.name;
                     const procLabel = app.count === 1 ? "1 proceso" : `${app.count} procesos`;
-                    const tip = `${app.name} · RAM: ${formatMem(app.rss)} (${formatPct(app.ramPct)}) · CPU: ${formatPct(app.cpuNorm)} · ${procLabel}`;
-                    return h_flex()
-                      .id(`sysmon-app-${app.name}`)
-                      .h(25)
-                      .flex_none()
-                      .px(6)
-                      .gap(6)
-                      .items_center()
-                      .rounded(5)
-                      .hover(s => s.bg(t.hover))
-                      .tooltip(tip)
-                      .child(renderAppIcon(app, t))
-                      .child(
-                        div()
-                          .flex_1()
-                          .min_w(0)
-                          .truncate()
-                          .text_size(11.5)
-                          .text_color(t.foreground)
-                          .child(app.name),
-                      )
-                      .child(
-                        div()
-                          .w(34)
-                          .flex_none()
-                          .text_right()
-                          .text_size(11)
-                          .text_color(this.sortBy === "cpu" ? t.foreground : t.dim)
-                          .child(formatPct(app.cpuNorm)),
-                      )
-                      .child(
-                        div()
-                          .w(42)
-                          .flex_none()
-                          .text_right()
-                          .text_size(11)
-                          .font_medium()
-                          .text_color(this.sortBy === "ram" ? t.foreground : t.muted)
-                          .child(formatMem(app.rss)),
-                      );
+                    const deepNote = app.deepCount > 0 ? ` · ${app.deepCount} hijos (${formatMem(app.deepRss)}, prof. ${app.maxDepth})` : "";
+                    const tip = `${app.name} · RAM: ${formatMem(app.rss)} (${formatPct(app.ramPct)}) · CPU: ${formatPct(app.cpuNorm)} · ${procLabel}${deepNote}\nClic para ver subprocesos`;
+                    const rows = [
+                      h_flex()
+                        .id(`sysmon-app-${app.name}`)
+                        .h(25)
+                        .flex_none()
+                        .px(6)
+                        .gap(6)
+                        .items_center()
+                        .rounded(5)
+                        .cursor_pointer()
+                        .when(isExpanded, r => r.bg(t.selected))
+                        .hover(s => s.bg(isExpanded ? t.selected : t.hover))
+                        .tooltip(tip)
+                        .on_click((_e, cx) => {
+                          this.expandedApp = isExpanded ? null : app.name;
+                          if (this.expandedApp) this.sample(cx);
+                          cx.notify();
+                        })
+                        .child(renderAppIcon(app, t))
+                        .child(
+                          div()
+                            .flex_1()
+                            .min_w(0)
+                            .truncate()
+                            .text_size(11.5)
+                            .text_color(t.foreground)
+                            .child(app.name),
+                        )
+                        .when(app.deepCount > 0, r =>
+                          r.child(div().px(3).rounded(3).bg(t.surface).text_size(9.5).text_color(t.dim).child(`+${app.deepCount}`)),
+                        )
+                        .child(
+                          div()
+                            .w(34)
+                            .flex_none()
+                            .text_right()
+                            .text_size(11)
+                            .text_color(this.sortBy === "cpu" ? t.foreground : t.dim)
+                            .child(formatPct(app.cpuNorm)),
+                        )
+                        .child(
+                          div()
+                            .w(42)
+                            .flex_none()
+                            .text_right()
+                            .text_size(11)
+                            .font_medium()
+                            .text_color(this.sortBy === "ram" ? t.foreground : t.muted)
+                            .child(formatMem(app.rss)),
+                        ),
+                    ];
+                    if (isExpanded && app.subProcs.length > 0) {
+                      for (const sp of app.subProcs) {
+                        rows.push(
+                          h_flex()
+                            .id(`sysmon-sp-${app.name}-${sp.pid}`)
+                            .h(20)
+                            .flex_none()
+                            .pl(24)
+                            .pr(8)
+                            .gap(6)
+                            .items_center()
+                            .text_size(10.5)
+                            .text_color(t.dim)
+                            .child(div().flex_1().min_w(0).truncate().child(`${sp.depth > 0 ? `└d${sp.depth} ` : ""}${sp.comm} (${sp.pid})`))
+                            .child(div().flex_none().text_color(t.muted).child(formatMem(sp.rss))),
+                        );
+                      }
+                    }
+                    return rows;
                   }),
                 ),
             ),
