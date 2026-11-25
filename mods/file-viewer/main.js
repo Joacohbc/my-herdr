@@ -1,7 +1,8 @@
 // Read-only code & Markdown preview viewer pane opened by files-search.
+// Controls live in the unified pane-custom header bar via shared state.
 import { View, div } from "gpui-kit";
-import { v_flex, h_flex, Editor, EditorState, TextView } from "gpui-base";
-import { props, readTextFile, theme, settings, shared, run, panes, focused, checking } from "herdr";
+import { v_flex, Editor, EditorState, TextView } from "gpui-base";
+import { props, readTextFile, theme, settings, shared, setShared, panes, focused, checking } from "herdr";
 
 const LANG = {
   ts: "js", tsx: "js", mts: "js", cts: "js", jsx: "js", mjs: "js",
@@ -46,8 +47,10 @@ export default class FileViewer extends View {
     this.fontDelta = 0;
     this.loadSeq = 0;
     this.lastSharedSeq = shared("file-viewer.open")?.seq ?? 0;
+    this.lastCmdSeq = shared("file-viewer.cmd")?.seq ?? 0;
     this.solo = Boolean(initialProps?.solo);
     this.tabId = initialProps?.tab ?? focused()?.tab ?? null;
+    this.paneId = null;
 
     if (checking()) return;
     const p = initialProps ?? props();
@@ -59,6 +62,82 @@ export default class FileViewer extends View {
   close() {
     this.code?.release();
     this.code = null;
+    if (this.paneId) {
+      const all = { ...(shared("file-viewer.meta") ?? {}) };
+      delete all[this.paneId];
+      setShared("file-viewer.meta", all);
+    }
+  }
+
+  resolvePaneId() {
+    const list = panes().filter(p => p.mod === "file-viewer" && (!this.tabId || p.tab === this.tabId));
+    if (this.paneId && list.some(p => p.pane === this.paneId)) return this.paneId;
+    const focusedMatch = list.find(p => p.focused);
+    if (focusedMatch) {
+      this.paneId = focusedMatch.pane;
+      return this.paneId;
+    }
+    if (list.length === 1) {
+      this.paneId = list[0].pane;
+      return this.paneId;
+    }
+    return this.paneId;
+  }
+
+  publishMeta() {
+    const paneId = this.resolvePaneId();
+    if (!paneId) return;
+    const baseSize = settings().font_size ?? 14;
+    const fontSize = Math.max(9, Math.min(28, baseSize + this.fontDelta));
+    const zoomPct = Math.round((fontSize / baseSize) * 100);
+    const md = isMarkdown(this.file);
+    const next = {
+      file: this.file,
+      root: this.root,
+      on: this.on,
+      line: this.line,
+      md,
+      preview: md && this.previewMarkdown,
+      wrap: this.softWrap,
+      zoomPct,
+    };
+    const all = shared("file-viewer.meta") ?? {};
+    const prev = all[paneId];
+    if (
+      prev &&
+      prev.file === next.file &&
+      prev.line === next.line &&
+      prev.md === next.md &&
+      prev.preview === next.preview &&
+      prev.wrap === next.wrap &&
+      prev.zoomPct === next.zoomPct
+    ) {
+      return;
+    }
+    setShared("file-viewer.meta", { ...all, [paneId]: next });
+  }
+
+  checkCommands(cx) {
+    const cmd = shared("file-viewer.cmd");
+    if (!cmd || !cmd.seq || cmd.seq === this.lastCmdSeq) return;
+    const paneId = this.resolvePaneId();
+    if (cmd.pane && paneId && cmd.pane !== paneId) return;
+    this.lastCmdSeq = cmd.seq;
+
+    if (cmd.action === "toggle_preview") {
+      this.previewMarkdown = !this.previewMarkdown;
+    } else if (cmd.action === "toggle_wrap") {
+      this.softWrap = !this.softWrap;
+      this.code?.set_soft_wrap(this.softWrap);
+    } else if (cmd.action === "zoom_in") {
+      this.fontDelta = Math.min(12, this.fontDelta + 1);
+    } else if (cmd.action === "zoom_out") {
+      this.fontDelta = Math.max(-5, this.fontDelta - 1);
+    } else if (cmd.action === "zoom_reset") {
+      this.fontDelta = 0;
+    }
+    this.publishMeta();
+    cx.notify();
   }
 
   checkSharedTarget(cx) {
@@ -66,14 +145,10 @@ export default class FileViewer extends View {
     const req = shared("file-viewer.open");
     if (!req || !req.seq || req.seq === this.lastSharedSeq) return;
     if (this.tabId && req.tab && req.tab !== this.tabId) return;
-    if (req.pane && this.myPaneId() && req.pane !== this.myPaneId()) return;
+    const paneId = this.resolvePaneId();
+    if (req.pane && paneId && req.pane !== paneId) return;
     this.lastSharedSeq = req.seq;
     this.openTarget(req, cx);
-  }
-
-  myPaneId() {
-    const list = panes().filter(p => p.mod === "file-viewer" && (!this.tabId || p.tab === this.tabId));
-    return list.length === 1 ? list[0].pane : null;
   }
 
   openTarget(target, cx) {
@@ -94,6 +169,7 @@ export default class FileViewer extends View {
       } else {
         this.highlightRange = null;
       }
+      this.publishMeta();
       cx.notify();
       return;
     }
@@ -104,6 +180,7 @@ export default class FileViewer extends View {
     this.highlightRange = null;
     this.previewMarkdown = isMarkdown(this.file);
     this.loading = true;
+    this.publishMeta();
 
     const fullPath = `${this.root}/${this.file}`;
     const on = this.on;
@@ -151,6 +228,7 @@ export default class FileViewer extends View {
       } finally {
         if (this.loadSeq === seq) {
           this.loading = false;
+          this.publishMeta();
           cx.notify();
         }
       }
@@ -158,19 +236,16 @@ export default class FileViewer extends View {
   }
 
   render(cx) {
-    if (!checking()) this.checkSharedTarget(cx);
+    if (!checking()) {
+      this.checkSharedTarget(cx);
+      this.checkCommands(cx);
+      this.publishMeta();
+    }
     const t = theme();
     const font = settings();
     const fontSize = Math.max(9, Math.min(28, (font.font_size ?? 14) + this.fontDelta));
     const md = isMarkdown(this.file);
     const showMdPreview = md && this.previewMarkdown && this.rawText !== null;
-    const myPane = panes().find(
-      p => p.mod === "file-viewer" && (!this.tabId || p.tab === this.tabId) && (p.focused || panes().filter(x => x.mod === "file-viewer" && (!this.tabId || x.tab === this.tabId)).length === 1),
-    );
-    const isZoomed = Boolean(myPane?.zoomed);
-    const title = this.file
-      ? (this.line ? `${this.file}:${this.line}` : this.file)
-      : "No file selected";
 
     let body;
     if (showMdPreview) {
@@ -209,6 +284,7 @@ export default class FileViewer extends View {
         if (dy === 0) return;
         cx.stop_propagation();
         this.fontDelta = Math.max(-5, Math.min(12, this.fontDelta + (dy > 0 ? 1 : -1)));
+        this.publishMeta();
         cx.notify();
       })
       .on_pinch((e, cx) => {
@@ -216,136 +292,9 @@ export default class FileViewer extends View {
         if (Math.abs(d) < 0.02) return;
         cx.stop_propagation();
         this.fontDelta = Math.max(-5, Math.min(12, this.fontDelta + (d > 0 ? 1 : -1)));
+        this.publishMeta();
         cx.notify();
       })
-      .child(
-        h_flex()
-          .h(34)
-          .flex_none()
-          .px(12)
-          .gap(4)
-          .items_center()
-          .border_b(1)
-          .border_color(t.border)
-          .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.muted).child(title))
-          .when(md, el =>
-            el.child(
-              div()
-                .id("fv-md-toggle")
-                .px(6)
-                .py(2)
-                .rounded(5)
-                .text_size(11)
-                .font_medium()
-                .cursor_pointer()
-                .when(this.previewMarkdown, c => c.bg(t.selected))
-                .text_color(this.previewMarkdown ? t.accent : t.dim)
-                .hover(s => s.bg(this.previewMarkdown ? t.selected : t.hover).text_color(this.previewMarkdown ? t.accent : t.foreground))
-                .on_click((_e, cx) => {
-                  this.previewMarkdown = !this.previewMarkdown;
-                  cx.notify();
-                })
-                .child(this.previewMarkdown ? "Preview" : "Raw"),
-            ),
-          )
-          .child(
-            div()
-              .id("fv-zoom-out")
-              .px(5)
-              .py(2)
-              .rounded(5)
-              .text_size(11)
-              .text_color(t.dim)
-              .cursor_pointer()
-              .hover(s => s.bg(t.hover).text_color(t.foreground))
-              .on_click((_e, cx) => {
-                this.fontDelta = Math.max(-5, this.fontDelta - 1);
-                cx.notify();
-              })
-              .child("A−"),
-          )
-          .when(this.fontDelta !== 0, el =>
-            el.child(
-              div()
-                .id("fv-zoom-reset")
-                .px(4)
-                .py(2)
-                .rounded(5)
-                .text_size(10.5)
-                .text_color(t.accent)
-                .cursor_pointer()
-                .hover(s => s.bg(t.hover))
-                .on_click((_e, cx) => {
-                  this.fontDelta = 0;
-                  cx.notify();
-                })
-                .child(`${fontSize}px`),
-            ),
-          )
-          .child(
-            div()
-              .id("fv-zoom-in")
-              .px(5)
-              .py(2)
-              .rounded(5)
-              .text_size(11)
-              .text_color(t.dim)
-              .cursor_pointer()
-              .hover(s => s.bg(t.hover).text_color(t.foreground))
-              .on_click((_e, cx) => {
-                this.fontDelta = Math.min(12, this.fontDelta + 1);
-                cx.notify();
-              })
-              .child("A+"),
-          )
-          .child(
-            div()
-              .id("fv-pane-zoom")
-              .px(6)
-              .py(2)
-              .rounded(5)
-              .text_size(11)
-              .cursor_pointer()
-              .when(isZoomed, el => el.bg(t.selected))
-              .text_color(isZoomed ? t.accent : t.dim)
-              .hover(s => s.bg(isZoomed ? t.selected : t.hover).text_color(isZoomed ? t.accent : t.foreground))
-              .on_click(() => run("pane.zoom"))
-              .child(isZoomed ? "Unzoom" : "Zoom"),
-          )
-          .when(!showMdPreview, el =>
-            el.child(
-              div()
-                .id("fv-wrap")
-                .px(6)
-                .py(2)
-                .rounded(5)
-                .text_size(11)
-                .cursor_pointer()
-                .when(this.softWrap, c => c.bg(t.selected))
-                .text_color(this.softWrap ? t.accent : t.dim)
-                .hover(s => s.bg(this.softWrap ? t.selected : t.hover).text_color(this.softWrap ? t.accent : t.foreground))
-                .on_click((_e, cx) => {
-                  this.softWrap = !this.softWrap;
-                  this.code?.set_soft_wrap(this.softWrap);
-                  cx.notify();
-                })
-                .child("Wrap"),
-            ),
-          )
-          .child(
-            div()
-              .id("fv-close")
-              .px(6)
-              .py(2)
-              .rounded(5)
-              .text_size(12)
-              .text_color(t.dim)
-              .cursor_pointer()
-              .hover(s => s.bg(t.hover).text_color(t.foreground))
-              .on_click(() => run("pane.close"))
-              .child("×"),
-          ),
-      )
       .child(body);
   }
 }

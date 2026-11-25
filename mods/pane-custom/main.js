@@ -1,7 +1,7 @@
-// Pane header with zoom controls (- / % / +), pane zoom/unzoom, split, and close.
+// Unified pane header: zoom controls, file-viewer toggles (Preview/Raw, Wrap), pane zoom, split, and close.
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { panes, props, run, theme, home, layout, settings } from "herdr";
+import { panes, props, run, theme, home, layout, settings, shared, setShared, spaces, focused, nextCommand, checking } from "herdr";
 
 function paneFrame(node) {
   if (!node || node.hidden) return null;
@@ -29,8 +29,96 @@ function folder(cwd) {
   return cwd === h ? "~" : cwd.startsWith(h + "/") ? "~" + cwd.slice(h.length) : cwd;
 }
 
+function sendViewerCmd(pane, action) {
+  const prev = shared("file-viewer.cmd")?.seq ?? 0;
+  setShared("file-viewer.cmd", { pane, action, seq: prev + 1 });
+}
+
+function snapshotPane(p) {
+  if (p.mod === "file-viewer") {
+    const meta = shared("file-viewer.meta")?.[p.pane];
+    if (meta?.file && meta?.root) {
+      return { kind: "file-viewer", file: meta.file, root: meta.root, on: meta.on ?? null, line: meta.line ?? null, name: p.name };
+    }
+  }
+  return { kind: "terminal", cwd: p.cwd || null, name: p.name || null };
+}
+
+function closeFocusedPane() {
+  const f = focused();
+  const p = f?.pane ? panes().find(x => x.pane === f.pane) : null;
+  if (!p) return;
+  const stack = [...(shared("tiling.closedPanes") ?? []), snapshotPane(p)].slice(-20);
+  setShared("tiling.closedPanes", stack);
+  run("pane.close", { pane: p.pane });
+}
+
+function reopenClosedPane() {
+  const stack = [...(shared("tiling.closedPanes") ?? [])];
+  const entry = stack.pop();
+  if (!entry) return;
+  setShared("tiling.closedPanes", stack);
+  if (entry.kind === "file-viewer") {
+    const res = run("pane.split", {
+      direction: "right",
+      mod: "file-viewer",
+      props: { file: entry.file, root: entry.root, on: entry.on, tab: focused()?.tab ?? null, line: entry.line },
+    });
+    if (res?.pane && entry.name) run("pane.rename", { pane: res.pane, name: entry.name });
+    return;
+  }
+  run("terminal.open", {
+    place: "right",
+    ...(entry.cwd ? { folder: entry.cwd } : {}),
+    ...(entry.name ? { name: entry.name } : {}),
+  });
+}
+
+function closeFocusedTab() {
+  const space = spaces().find(s => s.active);
+  const tab = space?.tabs?.find(t => t.active);
+  if (!tab) return;
+  const tabPanes = panes().filter(p => p.tab === tab.id).map(snapshotPane);
+  const stack = [...(shared("tiling.closedTabs") ?? []), { name: tab.name, panes: tabPanes }].slice(-20);
+  setShared("tiling.closedTabs", stack);
+  run("tab.close", { id: tab.id });
+}
+
+function reopenClosedTab() {
+  const stack = [...(shared("tiling.closedTabs") ?? [])];
+  const entry = stack.pop();
+  if (!entry) return;
+  setShared("tiling.closedTabs", stack);
+  const first = entry.panes?.[0];
+  if (first?.kind === "file-viewer") {
+    run("tab.new", {
+      name: entry.name || first.name || first.file,
+      mod: "file-viewer",
+      props: { file: first.file, root: first.root, on: first.on, tab: null, line: first.line, solo: true },
+    });
+    return;
+  }
+  run("tab.new", {
+    ...(entry.name ? { name: entry.name } : {}),
+    ...(first?.cwd ? { folder: first.cwd } : {}),
+  });
+}
+
 export default class PaneCustom extends View {
-  init() { this.hovered = false; }
+  init(_props, cx) {
+    this.hovered = false;
+    if (checking()) return;
+    cx.spawn(async () => {
+      for (;;) {
+        const cmd = await nextCommand();
+        if (!this.me()?.focused) continue;
+        if (cmd === "close_pane") closeFocusedPane();
+        else if (cmd === "reopen_pane") reopenClosedPane();
+        else if (cmd === "close_tab") closeFocusedTab();
+        else if (cmd === "reopen_tab") reopenClosedTab();
+      }
+    });
+  }
 
   me() {
     return panes().find((p) => p.pane === props()?.pane);
@@ -51,19 +139,20 @@ export default class PaneCustom extends View {
       .child(svg(`mods/pane-custom/${iconName}.svg`).size(14));
   }
 
-  textButton(t, id, label, command, args) {
+  pill(t, id, label, active, onClick) {
     return div()
       .id(id)
       .px(5)
       .py(1)
       .rounded(4)
       .text_size(11)
-      .text_color(t.dim)
       .cursor_pointer()
-      .hover((s) => s.bg(t.hover).text_color(t.foreground))
-      .on_click((_e, cx) => {
+      .when(active, el => el.bg(t.selected))
+      .text_color(active ? t.accent : t.dim)
+      .hover((s) => s.bg(active ? t.selected : t.hover).text_color(active ? t.accent : t.foreground))
+      .on_click((e, cx) => {
         cx.stop_propagation();
-        run(command, args);
+        onClick(e, cx);
       })
       .child(label);
   }
@@ -72,18 +161,30 @@ export default class PaneCustom extends View {
     const t = theme();
     const p = this.me();
     if (!p) return div();
+    const pane = p.pane;
+    const isViewer = p.mod === "file-viewer";
+    const meta = isViewer ? (shared("file-viewer.meta")?.[pane] ?? null) : null;
     const name = p.name || ((p.program?.agent || p.program?.shell) && p.program.name) || p.title || p.program?.name || "shell";
+    const subtitle = isViewer
+      ? (meta?.file ? (meta.line ? `${meta.file}:${meta.line}` : meta.file) : "")
+      : folder(p.cwd);
     const pic = icon(p.program, 14, t.dim);
     const st = p.status;
-    const pane = p.pane;
     const bottom = paneFrame(layout())?.header?.position === "bottom";
-    const zoomPct = Math.round((settings().zoom ?? 1) * 100);
+
+    const zoomPct = isViewer
+      ? (meta?.zoomPct ?? 100)
+      : Math.round((settings().zoom ?? 1) * 100);
+
+    const onZoomOut = () => isViewer ? sendViewerCmd(pane, "zoom_out") : run("app.zoom_out");
+    const onZoomReset = () => isViewer ? sendViewerCmd(pane, "zoom_reset") : run("app.zoom_reset");
+    const onZoomIn = () => isViewer ? sendViewerCmd(pane, "zoom_in") : run("app.zoom_in");
 
     return h_flex()
       .id(`pane-head-${pane}`)
       .size_full()
       .px(10)
-      .gap(6)
+      .gap(5)
       .items_center()
       .bg(t.background)
       .when(bottom, el => el.border_t(1))
@@ -96,19 +197,24 @@ export default class PaneCustom extends View {
         const dy = e.delta?.y ?? 0;
         if (dy === 0) return;
         cx.stop_propagation();
-        run(dy > 0 ? "app.zoom_in" : "app.zoom_out");
+        if (dy > 0) onZoomIn();
+        else onZoomOut();
       })
       .on_click(() => run("pane.focus", { pane }))
       .when(Boolean(pic), (el) => el.child(pic))
-      .child(div().flex_none().truncate().max_w(260).font_medium().text_color(t.foreground).child(name))
-      .child(div().flex_1().truncate().text_color(t.dim).child(folder(p.cwd)))
+      .child(div().flex_none().truncate().max_w(220).font_medium().text_color(t.foreground).child(name))
+      .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.dim).child(subtitle))
       .when(st === "working", el => el.child(svg("mods/workspace-chrome/spinner.svg").size(12).flex_none().text_color(t.working).spin(900)))
       .when(st === "blocked", el => el.child(div().flex_none().px(6).h(18).flex().items_center().rounded(5).bg(t.blocked + "26").text_size(10.5).font_semibold().text_color(t.blocked).child("Needs you")))
       .when(st === "done", el => el.child(div().size(7).flex_none().rounded(4).bg(t.done)))
-      .when(this.hovered || p.focused, el => el
-        .child(this.textButton(t, `ph-zo-${pane}`, "−", "app.zoom_out"))
-        .child(this.textButton(t, `ph-zr-${pane}`, `${zoomPct}%`, "app.zoom_reset"))
-        .child(this.textButton(t, `ph-zi-${pane}`, "+", "app.zoom_in")))
+      .when(isViewer && Boolean(meta?.md), el => el
+        .child(this.pill(t, `ph-md-${pane}`, meta.preview ? "Preview" : "Raw", Boolean(meta.preview), () => sendViewerCmd(pane, "toggle_preview"))))
+      .when(isViewer && !meta?.preview, el => el
+        .child(this.pill(t, `ph-wrap-${pane}`, "Wrap", Boolean(meta?.wrap), () => sendViewerCmd(pane, "toggle_wrap"))))
+      .when(this.hovered || p.focused || isViewer, el => el
+        .child(this.pill(t, `ph-zo-${pane}`, "−", false, onZoomOut))
+        .child(this.pill(t, `ph-zr-${pane}`, `${zoomPct}%`, zoomPct !== 100, onZoomReset))
+        .child(this.pill(t, `ph-zi-${pane}`, "+", false, onZoomIn)))
       .when(this.hovered || p.zoomed, el => el
         .child(this.button(t, `ph-z-${pane}`, p.zoomed ? "unzoom" : "zoom", "pane.zoom", { pane })))
       .when(this.hovered, el => el
