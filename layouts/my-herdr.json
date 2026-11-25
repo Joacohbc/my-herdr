@@ -69,6 +69,28 @@
                 "px": 160
               },
               "min": 64
+            },
+            {
+              "id": "docker",
+              "type": "block",
+              "content": {
+                "mod": "docker-monitor"
+              },
+              "size": {
+                "px": 180
+              },
+              "min": 64
+            },
+            {
+              "id": "usage",
+              "type": "block",
+              "content": {
+                "mod": "ai-usage"
+              },
+              "size": {
+                "px": 220
+              },
+              "min": 64
             }
           ]
         },

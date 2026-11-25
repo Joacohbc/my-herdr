@@ -1,5 +1,5 @@
-export const STACK = ["agents", "system-monitor", "ports-monitor"];
-export const MINS = { agents: 60, "system-monitor": 62, "ports-monitor": 64 };
+export const STACK = ["agents", "system-monitor", "ports-monitor", "docker", "usage"];
+export const MINS = { agents: 60, "system-monitor": 62, "ports-monitor": 64, docker: 64, usage: 64 };
 export const SPACES_MIN = 90;
 export const BRAND_PX = 46;
 

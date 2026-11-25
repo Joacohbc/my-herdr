@@ -108,13 +108,36 @@ Paleta de comandos unificada (`Ctrl + Shift + P`), ejecutor de comandos en termi
   - **Modo Ejecutor (`>`):** al escribir `>` (o pulsar `> Run`), filtra aliases cargados de `~/.config/herdr-app/command-aliases.json` (máx. `100`) y comandos recientes (`shared("command-palette.recent")`, máx. `10`). Permite ejecutar comandos arbitrarios o aliases en una nueva terminal (`Enter` según destino configurado `Tab`/`Split →`, `Shift + Enter` en split derecho, toggle `Keep open` / `Auto-close`), añadir nuevos aliases inline (`+ Add Alias`) o abrir `command-aliases.json` en `file-viewer` (`Edit JSON`).
   - **Creación y edición rápida (`micro`/`nano`):** crea archivos o carpetas con soporte de rutas anidadas (`mkdir -p --`, argumentos posicionales `"$1"`, validación contra `..`, compatible con local y SSH) y autodetecta `micro` → `nano` → `vi` en la máquina destino para abrir el archivo directamente en terminal.
 
+### 1.11 `docker-monitor` (`mods/docker-monitor/`)
+Bloque `docker` del sidebar izquierdo (debajo de `ports-monitor`) con los contenedores Docker y su consumo de CPU/RAM.
+
+- **Archivos:** `main.js` (vista), `docker.js` (muestreo y acciones), `stack-resize.js` (copia), `icons/docker.svg`, `mod.json`.
+- **Muestreo:** `docker ps -a --format '{{json .}}'` + `docker stats --no-stream` (solo si hay contenedores corriendo) cada `5 s`, o `15 s` colapsado o con la ventana sin foco. Sidebar oculto: sin polling; tras `30 s` vacía contenedores e historial. Si el daemon falla, muestra el error y reintenta cada `60 s`.
+- **Vista:** agrupada por proyecto de compose (`com.docker.compose.project`, colapsable) con totales; cada fila muestra solo estado, nombre, CPU y RAM (`—` si un contenedor corriendo aún no tiene stats). Al pasar el mouse se expande con imagen, puertos, estado, barra de RAM, sparkline de CPU (`30` muestras), PIDs y acciones. Filtro `Running`/`All` en `localStorage`. Modos compacto (`CPU · RAM` totales) y rail (ícono + contador).
+- **Acciones:** `Logs` (`docker logs -f --tail 200`) y `Shell` (`docker exec -it … sh`) en pestaña nueva vía `terminal.open { argv }`; `Restart`/`Start` directos; `Stop`/`Remove` con confirmación en línea dentro de la propia fila. Mientras una acción corre, la fila muestra spinner + `Stopping…`/`Restarting…` y bloquea nuevas acciones sobre ese contenedor. El ID siempre va tras `--`.
+- **Límites:** máx. `64` contenedores y `30` muestras de CPU por contenedor vivo.
+
+### 1.12 `ai-usage` (`mods/ai-usage/`)
+Bloque `usage` del sidebar izquierdo (último del stack) con la cuota y el modelo más usado de Claude Code y Antigravity.
+
+- **Archivos:** `main.js` (vista), `node.js` (config, resolución de Node y ejecución), `collect.mjs` (agregador fuera del sandbox), `stack-resize.js` (copia), `icons/usage.svg`, `mod.json`.
+- **Configuración (`ai-usage.json`):** enlazado a `~/.config/herdr-app/ai-usage.json`. `"node"`: binario o *home* de Node (`<home>/bin/node`, admite `~`); vacío = `command -v node` y luego `$SHELL -ic 'which node'` (recoge nvm/fnm/volta del shell interactivo). `"claude"` y `"agy"`: binarios de los CLIs (vacío = misma resolución con `which`). `"claudeQuota"` / `"antigravityQuota": false` desactivan cada consulta de cuota.
+- **Recolección (`collect.mjs`):** cada `60 s` expandido o `5 min` colapsado, solo con el sidebar visible; devuelve ~1 KB de JSON.
+  - **Claude Code:** lectura incremental (offset por archivo) de `~/.claude/projects/**/*.jsonl` modificados en 7 días, deduplicando por `message.id` + `requestId`, en buckets de 5 min por modelo.
+  - **Cuota de Claude:** `claude -p /usage --output-format json --no-session-persistence` (comando local, 0 tokens). Su `result` es texto: se parsean las líneas `Current session/week (...): N% used · resets <fecha> (<zona>)` convirtiendo la fecha con `Intl` a la zona indicada. El directorio vacío `~/.claude/session-env/<session_id>` que deja se elimina con `rmdir` tras `1,5 s`. Caché de `5 min`; no se lee el token OAuth.
+  - **Antigravity:** `node:sqlite` en solo lectura sobre `~/.gemini/antigravity{,-cli}/conversations/*.db`; modelo y tokens desde `gen_metadata` (protobuf: campo `1.4` = `{2: input, 3: output, 5: caché}`, mapeo inferido, no documentado), hora interpolada desde `steps.metadata`. Generaciones y tokens (input + output, sin caché) en 5 h/7 días.
+  - **Cuota de Antigravity:** `agy -p /usage --output-format json` (comando local, 0 tokens) devuelve grupos (`Gemini Models`, `Claude and GPT models`) con buckets `5h`/`weekly` (`remaining_fraction`, `reset_time`); se muestran como porcentaje usado. Caché de `5 min`.
+- **Caché:** `~/.config/herdr-app/data/ai-usage/cache.json` (máx. `600` archivos, buckets podados a 7 días, `4000` generaciones por conversación, escritura atómica).
+- **Vista:** barras de cuota de Claude (5 h, semanal y por modelo) y de cada grupo de Antigravity (5 h y semanal) con tiempo al reinicio, resumen local de 5 h/7 días y top `4` modelos con porcentaje. Compacto: `5h % · wk % · Gemini 5h %`. `↻` fuerza re-resolver Node y recolectar.
+
 ---
 
 ## 2. Scripts y Configuración (`scripts/`, `install.sh`, `layouts/`)
 
 | Archivo | Propósito |
 | --- | --- |
-| `install.sh` | Crea los symlinks de `layouts/my-herdr.json`, `command-aliases.json` y los 10 mods hacia `~/.config/herdr-app/`, ejecuta `scripts/apply-keys.js` y valida todos los mods con `herdr-app check`. |
+| `install.sh` | Crea los symlinks de `layouts/my-herdr.json`, `command-aliases.json`, `ai-usage.json` y los 12 mods hacia `~/.config/herdr-app/`, ejecuta `scripts/apply-keys.js` y valida todos los mods con `herdr-app check`. |
+| `ai-usage.json` | Configuración de `ai-usage` (`node`: binario o home de Node; `claude`/`agy`: binarios de los CLIs; `claudeQuota`/`antigravityQuota`) enlazada a `~/.config/herdr-app/ai-usage.json`. |
 | `command-aliases.json` | Lista configurable de aliases (`{ name, command, description, place, keepOpen }`) consumida por `command-palette` en modo `>`. |
 | `scripts/apply-keys.js` | Sincroniza atajos de flechas (`Alt + ←/↓/↑/→`, `Alt + Shift + ←/↓/↑/→`), pestañas (`Ctrl+T`, `Ctrl+W`, `Ctrl+Shift+T`) y paleta (`Ctrl+Shift+P` → `mod.open:command-palette`) en `"global"`, `"layout:my-herdr"` y `"terminal"` dentro de `~/.config/herdr-app/keys.json`. |
 | `scripts/build-icons.js` | Compacta el mapa de Material Icon Theme desde `mods/files-search/material-icons.js` a tablas invertidas perezosas con `releaseIconCache()` para `files-search` (archivos + carpetas) y `changes-history` (solo archivos). |

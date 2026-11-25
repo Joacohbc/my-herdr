@@ -2,7 +2,7 @@
 
 ## 1. Visión General
 
-`my-herdr` es un repositorio Git (`/home/joaco/projects/my-herdr`) que concentra toda la personalización de **Herdr App** (`herdr-app`, interfaz nativa en Rust/GPUI) sobre la máquina local y hosts SSH conectados a `herdr-core` (`rbpil`, `rbpi8gbl`). El script `install.sh` enlaza mediante symlinks el layout, `command-aliases.json` y los 10 mods personalizados dentro de `~/.config/herdr-app/` y sincroniza `~/.config/herdr-app/keys.json`.
+`my-herdr` es un repositorio Git (`/home/joaco/projects/my-herdr`) que concentra toda la personalización de **Herdr App** (`herdr-app`, interfaz nativa en Rust/GPUI) sobre la máquina local y hosts SSH conectados a `herdr-core` (`rbpil`, `rbpi8gbl`). El script `install.sh` enlaza mediante symlinks el layout, `command-aliases.json` y los 12 mods personalizados dentro de `~/.config/herdr-app/` y sincroniza `~/.config/herdr-app/keys.json`.
 
 ```text
 root (row)
@@ -12,7 +12,9 @@ root (row)
 │   │   ├── spaces         → mod: spaces                [NATIVO]
 │   │   ├── agents         → mod: agents-custom         [CUSTOM]
 │   │   ├── system-monitor → mod: system-monitor        [CUSTOM]
-│   │   └── ports-monitor  → mod: ports-monitor         [CUSTOM]
+│   │   ├── ports-monitor  → mod: ports-monitor         [CUSTOM]
+│   │   ├── docker         → mod: docker-monitor        [CUSTOM]
+│   │   └── usage          → mod: ai-usage              [CUSTOM]
 │   └── sidebar-footer   → mod: workspace-chrome        [NATIVO]
 └── work (column)
     ├── tabs             → mod: tabs-custom             [CUSTOM]
@@ -53,6 +55,7 @@ Cada mod gestiona su memoria en tres capas complementarias:
 1. **Pausa por visibilidad:** `files-search` y `changes-history` inspeccionan el árbol de `layout()` (`panel.hidden` y `panel-body.active`) y `window()?.visible`. Al ocultarse, cancelan `watchFolder` al instante y detienen el polling rápido.
 2. **Evicción e hibernación por inactividad:**
    - Paneles laterales ocultos (`files-search`, `changes-history`): vacían cachés (`entries`, `marks`, `commits`, `rows`, `scans`, `releaseIconCache()`) tras `30 s`.
+   - Bloques del sidebar (`docker-monitor`, `ai-usage`): muestrean más lento al colapsarse (`15 s` / `5 min`), no muestrean con el sidebar oculto y vacían contenedores, historial de CPU y resumen de uso tras `30 s` oculto.
    - Pestañas en segundo plano (`file-viewer`, `changes-history` standalone): hibernan tras `45 s` liberando `EditorState`, texto, tabla CSV y archivos temporales en `data/fv-preview/`, excepto cuando `isDirty()` es verdadero.
 3. **Recolección coordinada (`system-monitor`):**
    - Cada `60 s` (y al iniciar) ejecuta `hc ls --all --json` y purga terminales con `state === "finished"` vía `hc rm`.
@@ -61,7 +64,7 @@ Cada mod gestiona su memoria en tres capas complementarias:
 
 ---
 
-## 4. Decisiones de Arquitectura (`D1`–`D17`)
+## 4. Decisiones de Arquitectura (`D1`–`D19`)
 
 | ID | Decisión | Alternativa descartada y motivo |
 | --- | --- | --- |
@@ -82,3 +85,5 @@ Cada mod gestiona su memoria en tres capas complementarias:
 | **D15** | Incorporar `mods/ports-monitor/` como bloque independiente en la barra lateral izquierda (junto a `system-monitor` y `agents-custom`), haciendo que los tres bloques soporten colapso/modo compacto vía `layout.resize` y deteniendo por completo el polling de `system-monitor` y `ports-monitor` cuando están minimizados. | Unificar puertos dentro de `system-monitor` saturaría el panel y acoplaría dos responsabilidades distintas; mantenerlos separados con colapso real y pausa de muestreo (`ss`/`ps`) garantiza bajo consumo de CPU/RAM y máximo espacio útil en el sidebar. |
 | **D16** | Enlazar `Ctrl + Shift + P` al overlay efímero `mods/command-palette/` con soporte de prefijo `>`, aliases configurables en `command-aliases.json` y diálogo de creación/edición rápida (`micro`/`nano`), manteniendo además entradas `"palette"` en los `mod.json` para compatibilidad con `app.palette`. | La paleta nativa `app.palette` solo filtra comandos estáticos y no permite interceptar `>` para ejecutar comandos arbitrarios en terminal ni cargar aliases desde un archivo externo configurable. Un overlay efímero (`"place": "none"`) consume cero RAM en reposo y funciona incluso cuando el panel `Files` está oculto. |
 | **D17** | Configurar `sidebar-lists` con `"resizable": false`, definir `agents`, `system-monitor` y `ports-monitor` en `px` con `spaces` como único bloque elástico (`weight: 1`, `min: 90`), e implementar un manejador superior de *resize por empuje* (`stack-resize.js` duplicado por mod debido al sandbox). | El divisor nativo de GPUI/Herdr solo redimensiona bloques inmediatamente adyacentes, por lo que quedaba bloqueado cuando el bloque superior estaba en su mínimo o encogía al vecino en lugar de empujarlo hacia arriba preservando su tamaño actual. |
+| **D18** | Montar `docker-monitor` y `ai-usage` como bloques `docker` y `usage` al final de `sidebar-lists` (en `px`, mínimo `64`), con modo compacto/colapsado, *resize por empuje* (`STACK` ampliado en las 5 copias de `stack-resize.js`) y filas Docker de una línea (nombre, CPU, RAM) que se expanden al pasar el mouse. | Como hijos del stack derecho `panel-body` quedaban ocultos tras un botón y competían con `Files`/`Changes`; el usuario quiere verlos siempre junto a `system-monitor` y `ports-monitor`. El colapso reduce el muestreo para acotar el costo de mantenerlos visibles. |
+| **D19** | Agregar el uso de IA en `mods/ai-usage/collect.mjs` (Node resuelto desde `ai-usage.json` → `command -v` → `$SHELL -ic 'which …'`) con caché incremental en `data/ai-usage/`, y obtener las cuotas con los comandos locales `claude -p /usage --no-session-persistence` y `agy -p /usage --output-format json`. | Leer ~200 MB de JSONL o abrir SQLite dentro del sandbox GPUI disparaba la RAM del mod y el runtime no tiene `node:sqlite`. El endpoint OAuth no documentado (`api/oauth/usage`) exigía leer el token de `~/.claude/.credentials.json`; los CLIs oficiales responden sin turno de modelo (0 tokens). `claude /usage` solo entrega texto, por lo que su parser puede romperse si cambia el formato: ante error se muestran las estimaciones locales. |
