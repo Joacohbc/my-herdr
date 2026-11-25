@@ -850,9 +850,10 @@ export default class FileViewer extends View {
       const activeIdx = Math.max(0, Math.min(ac.cols.length - 1, this.csvAcIndex));
       return h_flex()
         .id("fv-ac-cols")
-        .h(32)
+        .h(36)
         .flex_none()
         .px(10)
+        .pb(2)
         .gap(5)
         .items_center()
         .bg(t.surface)
@@ -889,9 +890,10 @@ export default class FileViewer extends View {
     const activeIdx = Math.max(0, Math.min(ac.values.length - 1, this.csvAcIndex));
     return h_flex()
       .id("fv-ac-vals")
-      .h(32)
+      .h(36)
       .flex_none()
       .px(10)
+      .pb(2)
       .gap(5)
       .items_center()
       .bg(t.surface)
@@ -1431,7 +1433,8 @@ export default class FileViewer extends View {
           .child(
             h_flex()
               .id("fv-csv-filter-box")
-              .w(240)
+              .flex_1()
+              .min_w(160)
               .h(24)
               .px(7)
               .gap(4)
@@ -1474,6 +1477,7 @@ export default class FileViewer extends View {
           )
           .child(
             div()
+              .flex_none()
               .text_size(11)
               .text_color(t.dim)
               .child(
@@ -1532,7 +1536,6 @@ export default class FileViewer extends View {
                 .child(`${this.csvColFilters.size} filter${this.csvColFilters.size === 1 ? "" : "s"} ×`),
             ),
           )
-          .child(div().flex_1())
           .when(this.csvDirty, el =>
             el
               .child(
