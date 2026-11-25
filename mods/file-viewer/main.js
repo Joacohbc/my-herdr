@@ -515,12 +515,12 @@ export default class FileViewer extends View {
           .p(20)
           .child(
             div()
-              .p(10)
+              .p(12)
               .rounded(8)
-              .bg(t.surface)
+              .bg(this.kind === "svg" ? "#e5e7eb" : t.surface)
               .border_1()
               .border_color(t.border)
-              .child(image(this.imageRelPath).w(imgSize).h(imgSize).object_fit("contain")),
+              .child(image(this.imageRelPath).w(imgSize).h(imgSize)),
           ),
       );
   }
@@ -575,7 +575,7 @@ export default class FileViewer extends View {
                 .border_1()
                 .border_color(t.border)
                 .bg("#ffffff")
-                .child(image(this.pdfRelPath).w(pageW).h(pageH).object_fit("contain")),
+                .child(image(this.pdfRelPath).w(pageW).h(pageH)),
             ),
           ),
       );
