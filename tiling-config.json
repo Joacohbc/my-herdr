@@ -1,0 +1,6 @@
+{
+  "layout": "my-herdr",
+  "base_modifier": "ctrl-alt",
+  "leader_key": "ctrl-space",
+  "resize_step_px": 40
+}

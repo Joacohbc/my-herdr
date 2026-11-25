@@ -53,8 +53,21 @@ Para el inventario completo de archivos, mods, repositorios de iconos y arquitec
   - Soportar **`Ctrl + ruedita del mouse`** y gesto **pinch** para ajustar el tamaño de fuente del visor (`fontDelta`), además de los botones `A−`, reset (`px`) y `A+`.
   - Incluir botón `Zoom` / `Unzoom` (`pane.zoom`), `Wrap` (en modo código) y cerrar (`×`).
 
-### Encabezado de paneles (`pane-custom`)
-- Todos los paneles deben permitir **control de zoom** (`−`, `%` reset, `+` vía `app.zoom_out` / `app.zoom_reset` / `app.zoom_in`) y **`Ctrl + ruedita del mouse`** sobre la barra superior del panel, además de `pane.zoom`, split y close.
+### Encabezado unificado de paneles (`pane-custom`) y Visor (`file-viewer`)
+- Todos los controles del visor (`Preview`/`Raw`, `Wrap`, `−` / `%` / `+`, `pane.zoom`, split y `×`) deben vivir **en la única barra superior de `pane-custom`** sin duplicar barras en `file-viewer`.
+- En paneles `file-viewer`, `−` / `%` / `+` y `Ctrl + ruedita` ajustan el zoom del visor (`fontDelta` vía `shared("file-viewer.cmd")`); en terminales ajustan `app.zoom_out` / `app.zoom_reset` / `app.zoom_in`.
+- `pane-custom` también escucha `nextCommand()` en el panel enfocado para cerrar y reabrir panes/tabs con historial (`close_pane`, `reopen_pane`, `close_tab`, `reopen_tab`).
+
+### Tiling Manager (`tiling-mode` + `tiling-config.json`)
+- La tecla base (`base_modifier`, por defecto `ctrl-alt`) y la tecla líder (`leader_key`, por defecto `ctrl-space`) se configuran en un único archivo `tiling-config.json` y se aplican en `"layout:my-herdr"` de `keys.json` vía `scripts/apply-tiling-keys.js`.
+- Atajos directos obligatorios con `Base`:
+  - `Base + flechas` (o `h/j/k/l`): mover foco (`pane.go`)
+  - `Base + Shift + flechas` (o `H/J/K/L`): mover/intercambiar paneles (`pane.swap`)
+  - `Base + v / s / z`: split derecha, split abajo, zoom
+  - `Base + q` / `Base + Shift + q`: cerrar panel actual / reabrir último panel cerrado
+  - `Base + w` / `Base + Shift + w`: cerrar tab actual / reabrir última tab cerrada
+  - `Base + [` / `]`: mover tab izquierda/derecha
+  - `Ctrl + Space` (o `Base + r`): abrir el HUD modal `tiling-mode` (navegación, swap, modo Resize con flechas `r`, splits, cerrar/reabrir).
 
 ### Monitor de sistema en el lateral izquierdo (`system-monitor`)
 - Mostrar **CPU total** y **RAM total** (uso / total / % con barra de color dinámico) + **procesos agrupados por aplicación** ordenables por `RAM` o `CPU`.

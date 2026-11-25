@@ -1,0 +1,12 @@
+{
+  "place": "none",
+  "focusable": true,
+  "palette": [
+    {
+      "title": "Tiling & Resize Mode",
+      "command": "mod.open",
+      "args": { "name": "tiling-mode" },
+      "words": "tiling resize swap move split pane"
+    }
+  ]
+}
