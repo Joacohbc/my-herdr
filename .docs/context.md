@@ -1,0 +1,19 @@
+# Glosario del Dominio (`my-herdr`)
+
+Vocabulario ubicuo de la configuración personalizada de **Herdr App** (`my-herdr`). Cada término tiene una única definición de referencia aquí.
+
+| Término | Código / Ruta | Definición |
+| --- | --- | --- |
+| **Layout clonado (`my-herdr`)** | `layouts/my-herdr.json` | Clon propio del layout nativo `main` de Herdr App. Nunca se edita `main.json` porque Herdr sobrescribe los layouts nativos en cada inicio o actualización. |
+| **Mod clonado / propio** | `mods/<nombre>/` | Panel o componente GPUI JavaScript gestionado en este repositorio y enlazado por symlink hacia `~/.config/herdr-app/mods/<nombre>/`. |
+| **Estado compartido (`shared`)** | `shared(key)` / `setShared(key, val)` | Bus de mensajería y estado persistido en `~/.config/herdr-app/shared.json` compartido entre mods. Cada escritura re-renderiza los mods activos. |
+| **Señal global de GC (`herdr.gc`)** | `shared("herdr.gc")` | Evento monotónico `{ seq, at, reason }` emitido por `system-monitor` (automáticamente cuando la RAM supera el 75 %, tras limpiar terminales finalizadas o al pulsar `GC`) para que todos los mods inactivos liberen cachés e hibernen pestañas en segundo plano. |
+| **Hibernación automática** | `hibernate()` en `file-viewer` y `changes-history` | Liberación automática de buffers pesados (`EditorState`, texto, tabla CSV, diffs, archivos temporales `data/fv-preview/`) cuando un panel permanece oculto o en una pestaña inactiva durante `>= 45 s` (o ante `herdr.gc`). Nunca hiberna una pestaña con cambios sin guardar (`isDirty()`). |
+| **Evicción de panel oculto** | `evictCaches()` en `files-search` y `changes-history` | Cancelación inmediata de `watchFolder` y vaciado de estructuras en RAM (`entries`, `marks`, `commits`, `rows`, `scans`, `releaseIconCache()`) tras `30 s` con el panel derecho cerrado o en otra pestaña del stack. |
+| **Pestaña dedicada (`solo`)** | `tab.new` con `props: { solo: true }` | Pestaña abierta con `Ctrl + clic` que contiene un único panel `file-viewer` o `changes-history` (commit/diff). Los clics normales desde `files-search` nunca sobrescriben una pestaña `solo`. |
+| **Estado sucio (`*` / dirty)** | `meta.dirty`, `codeDirty`, `csvDirty` | Indicador de ediciones locales pendientes en `file-viewer` (modo `Raw`/código o tabla CSV). Prefija `* ` en el encabezado de `pane-custom`, bloquea la hibernación y ofrece `✓ Save (Ctrl+S)` y `↺ Discard`. |
+| **Atribución profunda de procesos** | `parseSample()` en `system-monitor` | Agrupación de subprocesos genéricos o hijos (`pid`/`ppid`, hasta 6 niveles de profundidad) bajo su aplicación raíz (`VS Code`, `Antigravity`, `Docker`, `Herdr`, etc.), exponiendo conteo `+N` y desglose expandible. |
+| **Terminales finalizadas (`finished`)** | `hc ls --all --json` → `hc rm` | Terminales muertas retenidas en memoria por el daemon `herdr-core` con su historial. `system-monitor` las purga automáticamente cada 60 s. |
+| **Staging temporal de previews** | `~/.config/herdr-app/data/fv-preview/` | Directorio temporal donde `file-viewer` aloja symlinks de imágenes locales, copias SVG reescaladas a 1024 px, imágenes remotas decodificadas y el PNG de la página activa de un PDF. Se borra al cambiar de página, hibernar o cerrar el panel. |
+| **Badge de cambios** | `shared("changes.badge")` | Objeto `{ count, space }` publicado por `changes-history` y consumido por `tabs-custom` para mostrar el indicador circular flotante sobre el botón `Changes`. |
+| **Iconos compactos perezosos** | `scripts/build-icons.js`, `material-icons.js` | Representación invertida y comprimida del mapa oficial de VS Code Material Icon Theme (`~118 KB` totales frente a `842 KB` originales), parseada en `Map` solo bajo demanda y liberable mediante `releaseIconCache()`. |
