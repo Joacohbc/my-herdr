@@ -99,6 +99,14 @@ const MAX_SAVED_CONTEXTS = 8;
 const MAX_SAVED_FOLDERS = 10;
 const IDLE_CLEAN_MS = 30_000;
 const DEBOUNCE_MS = 180;
+const DELETE_SCRIPT = 'p="$1"; [ -e "$p" ] || [ -L "$p" ] || { echo "Not found" >&2; exit 1; }; if command -v gio >/dev/null 2>&1 && gio trash -- "$p" 2>/dev/null; then echo trash; exit 0; fi; if command -v trash-put >/dev/null 2>&1 && trash-put -- "$p" 2>/dev/null; then echo trash; exit 0; fi; if [ -d "$p" ] && [ ! -L "$p" ]; then rm -rf -- "$p"; else rm -f -- "$p"; fi && echo rm';
+
+function isSafeDeleteTarget(m) {
+  if (!m?.relPath || !m.absPath || !m.root) return false;
+  if (m.relPath.split(/[\\/]/).some(part => part === ".." || part === "." || part === "")) return false;
+  const root = m.root.replace(/\/+$/, "");
+  return m.absPath.startsWith(root + "/") && m.absPath !== root;
+}
 
 async function directory(path, on) {
   const windowsDirectory = async () => {
@@ -126,7 +134,10 @@ export default class FilesSearch extends View {
     const p = (initialProps && Object.keys(initialProps).length ? initialProps : null) ?? props();
     this.menuData = p?.menu ?? null;
     this.overlayId = p?.overlay ?? null;
-    if (this.menuData) return;
+    if (this.menuData) {
+      this.deleteState = null;
+      return;
+    }
 
     this.saved = new Map();
     this.entries = new Map();
@@ -363,9 +374,11 @@ export default class FilesSearch extends View {
       return;
     }
     if (refocused && (context.dirtyAt || !context.watch)) context.catchUp = true;
-    if (!active || this.loading) return;
+    if (this.loading) return;
     const now = Date.now();
-    if (context.catchUp || (context.dirtyAt && now >= context.watchAt) || now >= context.pollAt) this.refresh(cx);
+    if (context.dirtyAt && now >= context.watchAt) { this.refresh(cx); return; }
+    if (!active) return;
+    if (context.catchUp || now >= context.pollAt) this.refresh(cx);
   }
 
   watch(root, context, cx) {
@@ -444,7 +457,7 @@ export default class FilesSearch extends View {
       after: visiting ? now + 1 : context.dirtyAt || (context.lastStatus ?? -1) + 1,
       visiting,
       urgent: visiting || context.catchUp,
-      allowInactive: visiting,
+      allowInactive: visiting || Boolean(context.dirtyAt),
     };
     const needFolderReload = visiting || !this.entries.has("") || Boolean(context.dirtyAt) || Boolean(context.catchUp);
     context.catchUp = false;
@@ -458,7 +471,16 @@ export default class FilesSearch extends View {
         if (needFolderReload) {
           for (const path of ["", ...this.folders]) {
             if (!this.current(context)) return;
-            await this.loadFolder(path, context);
+            try { await this.loadFolder(path, context); }
+            catch (e) {
+              if (!path) throw e;
+              for (const folder of [...this.folders]) {
+                if (folder === path || folder.startsWith(path + "/")) {
+                  this.folders.delete(folder);
+                  this.entries.delete(folder);
+                }
+              }
+            }
           }
         }
         const top = await exec("git", ["rev-parse", "--show-toplevel"], { cwd, on }).catch(() => null);
@@ -481,6 +503,7 @@ export default class FilesSearch extends View {
         }
         if (!this.current(context)) return;
         if (context.dirtyAt <= covered) context.dirtyAt = 0;
+        if (!context.on && !context.watch) context.pollAt = Math.min(context.pollAt, Date.now() + 3000);
         this.marks = marks;
         this.error = null;
       } catch (e) { if (this.current(context)) this.error = String(e); }
@@ -551,7 +574,7 @@ export default class FilesSearch extends View {
       mod: "files-search",
       kind: "popup",
       width: 228,
-      height: isDir ? 174 : 238,
+      height: isDir ? 210 : 274,
       props: {
         menu: {
           relPath,
@@ -566,9 +589,111 @@ export default class FilesSearch extends View {
     });
   }
 
+  beginDelete(cx) {
+    const m = this.menuData;
+    if (window()?.platform === "windows" && !m?.on) {
+      notify({ title: "Delete is not supported on Windows yet", level: "warning", timeout: 2200 });
+      return;
+    }
+    if (!isSafeDeleteTarget(m)) {
+      notify({ title: "Cannot delete", body: m?.relPath ?? "", level: "warning", timeout: 2200 });
+      return;
+    }
+    this.deleteState = { phase: m.isDir ? "counting" : "confirm", count: m.isDir ? null : 0, error: null };
+    cx.notify();
+    if (!m.isDir) return;
+    cx.spawn(async cx => {
+      try {
+        const r = await exec("sh", ["-c", 'find "$1" -mindepth 1 2>/dev/null | head -n 1000 | wc -l', "files", m.absPath], { on: m.on ?? null, timeout: 8000 });
+        this.deleteState = { phase: "confirm", count: Number(r.stdout.trim()) || 0, error: null };
+      } catch (e) {
+        this.deleteState = { phase: "confirm", count: null, error: String(e.message || e) };
+      }
+      cx.notify();
+    });
+  }
+
+  confirmDelete(cx) {
+    const m = this.menuData;
+    if (!this.deleteState || this.deleteState.phase !== "confirm" || !isSafeDeleteTarget(m)) return;
+    this.deleteState = { ...this.deleteState, phase: "deleting", error: null };
+    cx.notify();
+    cx.spawn(async cx => {
+      try {
+        const r = await exec("sh", ["-c", DELETE_SCRIPT, "files", m.absPath], { on: m.on ?? null, timeout: 30000 });
+        if (r.code !== 0) throw new Error(r.stderr.trim() || "Delete failed");
+        const prev = shared("files-search.refresh")?.seq ?? 0;
+        setShared("files-search.refresh", { seq: prev + 1, root: m.root, on: m.on ?? null });
+        notify({ title: r.stdout.trim() === "trash" ? "Moved to trash" : "Deleted", body: m.relPath, level: "success", timeout: 2000 });
+        if (this.overlayId) closeOverlay(this.overlayId);
+      } catch (e) {
+        this.deleteState = { ...this.deleteState, phase: "confirm", error: String(e.message || e) };
+        cx.notify();
+      }
+    });
+  }
+
   renderContextMenu(t, fontFamily) {
     const m = this.menuData;
     const overlay = this.overlayId;
+    if (this.deleteState) {
+      const ds = this.deleteState;
+      const busy = ds.phase === "counting" || ds.phase === "deleting";
+      const bodyText = !m.isDir
+        ? "This file will be moved to the trash (or deleted if no trash is available)."
+        : ds.phase === "counting"
+          ? "Counting items…"
+          : ds.count === 0
+            ? "Empty folder."
+            : ds.count != null
+              ? `Folder contains ${ds.count >= 1000 ? "1000+" : ds.count} items. All of them will be deleted.`
+              : "Folder contents could not be counted.";
+      return v_flex()
+        .id("files-ctx-menu")
+        .size_full()
+        .p(10)
+        .gap(8)
+        .bg(t.popover ?? t.surface)
+        .text_color(t.foreground)
+        .when(Boolean(fontFamily), el => el.font_family(fontFamily))
+        .child(div().text_size(12.5).font_semibold().truncate().child(`Delete "${m.name}"?`))
+        .child(div().text_size(11).text_color(ds.count > 0 ? t.blocked : t.muted).child(bodyText))
+        .when(Boolean(ds.error), el => el.child(div().text_size(11).text_color(t.ansi1).child(ds.error)))
+        .child(div().flex_1())
+        .child(
+          h_flex()
+            .gap(6)
+            .justify_end()
+            .child(
+              div()
+                .id("ctx-del-cancel")
+                .px(10)
+                .py(5)
+                .rounded(5)
+                .text_size(11.5)
+                .text_color(t.foreground)
+                .bg(t.surface)
+                .cursor_pointer()
+                .hover(s => s.bg(t.hover))
+                .on_click(() => { if (overlay) closeOverlay(overlay); })
+                .child("Cancel"),
+            )
+            .child(
+              div()
+                .id("ctx-del-confirm")
+                .px(10)
+                .py(5)
+                .rounded(5)
+                .text_size(11.5)
+                .font_semibold()
+                .bg(t.ansi1)
+                .text_color(t.background)
+                .when(busy, el => el.opacity(0.5))
+                .when(!busy, el => el.cursor_pointer().on_click((_e, cx) => this.confirmDelete(cx)))
+                .child(ds.phase === "deleting" ? "Deleting…" : "Delete"),
+            ),
+        );
+    }
     const copyAndClose = (label, value, cx) => {
       cx.write_to_clipboard(value);
       if (overlay) closeOverlay(overlay);
@@ -653,7 +778,9 @@ export default class FilesSearch extends View {
               });
             }),
           ),
-      );
+      )
+      .child(div().h(1).my(2).bg(t.border))
+      .child(menuItem("ctx-delete", "Delete…", (_e, cx) => this.beginDelete(cx)).text_color(t.ansi1));
   }
 
   show(path, cx, locationTarget = null, event = null) {

@@ -20,7 +20,8 @@ Explorador de archivos perezoso con buscador estilo VS Code e iconos oficiales d
   - `Ctrl + clic`: abre en nueva pestaña dedicada (`solo: true`).
   - `Shift + clic`: abre un split adicional de `file-viewer`.
   - **Creación y edición rápida:** botones `+File` y `+Dir` en la barra superior (crean en la raíz del espacio activo vía `command-palette`) y reacción automática a `shared("files-search.refresh")` para refrescar y expandir carpetas padre.
-  - **Clic derecho:** abre menú contextual popup (`New File…`, `New Folder…`, `Copy Relative Path`, `Copy Absolute Path`, `Copy Name`, `Open in New Tab` y `Edit in Terminal (micro/nano)` con autodetección local/SSH).
+  - **Clic derecho:** abre menú contextual popup (`New File…`, `New Folder…`, `Copy Relative Path`, `Copy Absolute Path`, `Copy Name`, `Open in New Tab`, `Edit in Terminal (micro/nano)` con autodetección local/SSH, y `Delete…` con confirmación en popup, conteo de elementos en carpetas y envío a papelera vía `gio trash`/`trash-put` o `rm` pasando la ruta como `"$1"`).
+  - **Refresco en tiempo real:** los eventos de `watchFolder` actualizan el árbol y el estado Git incluso con la ventana sin foco (y podan automáticamente carpetas expandidas eliminadas).
 - **Límites de RAM:** `PER_FOLDER = 250`, `TOTAL = 1500`, `MAX_OPEN_FOLDERS = 24` (LRU), `MAX_SAVED_CONTEXTS = 8` (máx. 10 carpetas), `MAX_SCANS = 4`, evicción automática tras `30 s` oculto o señal `herdr.gc`.
 
 ### 1.2 `file-viewer` (`mods/file-viewer/`)
@@ -63,10 +64,10 @@ Clon personalizado de la barra de pestañas `tabs`.
 ### 1.6 `system-monitor` (`mods/system-monitor/`)
 Monitor en vivo de CPU, RAM y árbol de procesos en la barra lateral izquierda + motor de limpieza automática.
 
-- **Archivos:** `main.js`, `mod.json`, `icons/*.svg` (Java 32×32, Papirus-Dark, Devicon, Herdr).
+- **Archivos:** `main.js`, `stack-resize.js`, `mod.json`, `icons/*.svg` (Java 32×32, Papirus-Dark, Devicon, Herdr).
 - **Responsabilidades:**
   - Muestreo compacto vía `ps` + `awk` (`/proc/stat`, `/proc/meminfo` incluyendo Swap), polling adaptativo (`3 s` activo, `8 s` sin foco, pausado si la ventana no es visible o cuando el panel está minimizado).
-  - Colapsable a barra de `32 px` (`System ▸` / `System ▾` vía `layout.resize`), persistido en `localStorage["sys.collapsed"]`.
+  - Colapsable a barra de `62 px` (`System ▸` / `System ▾` vía `layout.resize`) restaurando su última altura expandida en `px`, y manejador superior de *resize por empuje* (**D17**) que conserva el tamaño de los bloques superiores/inferiores desplazándolos contra `spaces` y descolapsa automáticamente al agrandarse.
   - Atribución profunda por `pid`/`ppid` bajo la aplicación raíz (indicador `+N` y desglose expandible al hacer clic).
   - Modo rail compacto (`width < 140 px`): `C % / R %` + iconos 16×16 con alertas visuales (`<4%`, `4–10%`, `10–20%`, `≥20%`).
   - Limpieza automática cada `60 s` (y botón manual `GC`): purga terminales `finished` con `hc rm`, poda metadatos huérfanos y emite `herdr.gc`.
@@ -84,19 +85,19 @@ Modal centrado (`430×420`) para abrir el navegador o un enlace en un perfil esp
 ### 1.8 `ports-monitor` (`mods/ports-monitor/`)
 Monitor en tiempo real de puertos en escucha en la barra lateral izquierda con clasificación de sistema, detección de protocolo e integración directa con `web-launcher`.
 
-- **Archivos:** `main.js`, `detector.js`, `mod.json`, `icons/*.svg` (`http`, `https`, `db`, `mq`, `tcp`, `udp`, `sys`).
+- **Archivos:** `main.js`, `detector.js`, `stack-resize.js`, `mod.json`, `icons/*.svg` (`http`, `https`, `db`, `mq`, `tcp`, `udp`, `sys`).
 - **Funcionalidades:**
   - Muestreo en tiempo real vía `ss -H -tulnp` (`1.5 s` activo, `5 s` sin foco; detenido por completo cuando está minimizado o la ventana oculta), actualizando GPUI solo cuando cambia la firma de puertos.
   - Diferencia puertos de sistema (puertos conocidos como DNS `53`, mDNS `5353`, CUPS `631`, Tailscale `41641`, `127.0.0.53/54`, daemons OS) con toggle `Sys N`.
   - Identifica protocolos (`HTTP`, `HTTPS`, `DB`, `MQ`, `TCP`, `UDP`) mediante tabla conocida + sonda HTTP/HTTPS perezosa (`curl`, caché acotada `MAX_PROBE_CACHE = 128`, limpiada en `herdr.gc`), filtros por protocolo (`All | HTTP | DB | TCP | UDP`) y badge de exposición (`localhost`, `0.0.0.0`, `tailscale`).
   - Clic en puertos HTTP/HTTPS abre el modal `web-launcher` pre-rellenado; clic en otros puertos copia `host:port`. Publica `shared("ports.http")` (máx. `32`).
-  - Colapsable a barra de `32 px` (`Ports ▸` / `Ports ▾` vía `layout.resize`) y modo rail compacto (`width < 140 px`) con iconos + número de puerto.
+  - Colapsable a barra de `64 px` (`Ports ▸` / `Ports ▾` vía `layout.resize`) restaurando su última altura expandida en `px`, manejador superior de *resize por empuje* (**D17**) con descolapso automático al agrandarse, y modo rail compacto (`width < 140 px`) con iconos + número de puerto.
 
 ### 1.9 `agents-custom` (`mods/agents-custom/`)
 Clon personalizado del panel `agents` de la barra lateral izquierda.
 
-- **Archivos:** `main.js`, `mod.json`.
-- **Funcionalidades:** conserva agrupación/prioridad, sub-agentes y pines del mod nativo, hereda la fuente global (**D11**) y añade un **modo compacto vertical** (al pulsar `Agents ▾` o achicar el panel a `< 86 px`, `min: 60 px`) que muestra solo los iconos de los agentes uno al lado del otro con borde/punto de color según estado (`working`, `blocked`, `done`, `idle`).
+- **Archivos:** `main.js`, `stack-resize.js`, `mod.json`.
+- **Funcionalidades:** conserva agrupación/prioridad, sub-agentes y pines del mod nativo, hereda la fuente global (**D11**), añade un **modo compacto vertical** (al pulsar `Agents ▾` o achicar el panel a `< 86 px`, `min: 60 px`) con chips de estado, e incorpora un manejador superior de *resize por empuje* (**D17**) que preserva las alturas de los bloques vecinos contra `spaces`.
 
 ### 1.10 `command-palette` (`mods/command-palette/`)
 Paleta de comandos unificada (`Ctrl + Shift + P`), ejecutor de comandos en terminal con prefijo `>`, gestor de aliases configurables y diálogo de creación/edición rápida (`micro`/`nano`).
