@@ -33,6 +33,7 @@ const TOP_MODELS = 6;
 
 const args = new Set(process.argv.slice(2));
 const CLI_TIMEOUT_MS = 30_000;
+const FORCE_REFRESH = process.argv.includes("--force");
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 function argValue(name) {
@@ -316,7 +317,7 @@ async function resolveBinary(name, cache) {
   const configured = argValue(name);
   const misses = (cache.binaryMisses ??= {});
   const miss = misses[name];
-  if (miss && miss.configured === configured && now - miss.at < BINARY_MISS_TTL_MS) return { missing: true, error: miss.error };
+  if (!FORCE_REFRESH && miss && miss.configured === configured && now - miss.at < BINARY_MISS_TTL_MS) return { missing: true, error: miss.error };
   const res = await run("sh", ["-c", RESOLVE_BIN_SCRIPT, "sh", configured, name], CLI_TIMEOUT_MS);
   const path = res.stdout.trim().split("\n").pop();
   if (path?.startsWith("/")) {
@@ -386,7 +387,7 @@ async function removeEmptySessionEnvDirs() {
 
 async function fetchClaudeQuota(cache) {
   if (args.has("--no-quota")) return { disabled: true };
-  if (cache.quota && cache.quota.configured === argValue("claude") && now - cache.quota.at < QUOTA_TTL_MS) return cache.quota.data;
+  if (!FORCE_REFRESH && cache.quota && cache.quota.configured === argValue("claude") && now - cache.quota.at < QUOTA_TTL_MS) return cache.quota.data;
   let data;
   const claude = await resolveBinary("claude", cache);
   if (claude.missing) {
@@ -420,7 +421,7 @@ function toAntigravityGroups(command) {
 // `agy -p /usage` is answered locally by the CLI (no model turn, zero tokens).
 async function fetchAntigravityQuota(cache) {
   if (args.has("--no-agy-quota")) return { disabled: true };
-  if (cache.agyQuota && cache.agyQuota.configured === argValue("agy") && now - cache.agyQuota.at < QUOTA_TTL_MS) return cache.agyQuota.data;
+  if (!FORCE_REFRESH && cache.agyQuota && cache.agyQuota.configured === argValue("agy") && now - cache.agyQuota.at < QUOTA_TTL_MS) return cache.agyQuota.data;
   let data;
   const agy = await resolveBinary("agy", cache);
   if (agy.missing) {
@@ -516,10 +517,9 @@ async function main() {
     collectAntigravityGenerations(cache),
   ]);
   const claude = summarizeClaude(mergeClaudeEvents(claudeBuckets));
-  claude.quota = await fetchClaudeQuota(cache);
   const antigravity = summarizeAntigravity(antigravityGenerations);
   antigravity.conversations = Object.keys(cache.antigravityDbs).length;
-  antigravity.quota = await fetchAntigravityQuota(cache);
+  [claude.quota, antigravity.quota] = await Promise.all([fetchClaudeQuota(cache), fetchAntigravityQuota(cache)]);
   claude.installed = existsSync(CLAUDE_PROJECTS_DIR) || isCliPresent(claude.quota);
   antigravity.installed = ANTIGRAVITY_CONVERSATION_DIRS.some(dir => existsSync(dir)) || isCliPresent(antigravity.quota);
   saveCache(cache);

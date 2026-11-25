@@ -48,12 +48,13 @@ export async function resolveNode(configuredNode) {
   return { error: `Node.js not found. Install it or set "node" (binary or Node home) in ~/.config/herdr-app/${CONFIG_FILE_NAME}` };
 }
 
-export async function runCollector(nodePath, { claude, agy, claudeQuota, antigravityQuota }) {
+export async function runCollector(nodePath, { claude, agy, claudeQuota, antigravityQuota }, { force = false } = {}) {
   const args = ["--no-warnings", `${appHome()}/mods/ai-usage/collect.mjs`];
   if (!claudeQuota) args.push("--no-quota");
   if (!antigravityQuota) args.push("--no-agy-quota");
   if (claude) args.push(`--claude=${claude}`);
   if (agy) args.push(`--agy=${agy}`);
+  if (force) args.push("--force");
   const res = await exec(nodePath, args, { timeout: COLLECT_TIMEOUT_MS });
   let parsed = {};
   try { parsed = JSON.parse(res.stdout || "{}"); } catch {}

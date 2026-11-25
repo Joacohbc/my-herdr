@@ -104,14 +104,14 @@ export default class AiUsage extends View {
     if (this.ticks === 0) cx.notify();
   }
 
-  refresh(cx) {
+  refresh(cx, { force = false } = {}) {
     if (this.loading) return;
     this.loading = true;
     this.lastPollAt = Date.now();
     cx.notify();
     cx.spawn(async cx => {
       try {
-        await this.collect();
+        await this.collect(force);
       } catch (err) {
         this.error = String(err?.message ?? err);
       } finally {
@@ -121,7 +121,7 @@ export default class AiUsage extends View {
     });
   }
 
-  async collect() {
+  async collect(force) {
     const config = await loadConfig();
     if (config.error) {
       this.error = config.error;
@@ -138,7 +138,7 @@ export default class AiUsage extends View {
         return;
       }
     }
-    const result = await runCollector(this.nodePath, config);
+    const result = await runCollector(this.nodePath, config, { force });
     if (result.failedToStart) this.nodePath = null;
     this.error = result.error;
     if (result.data) this.data = result.data;
@@ -361,7 +361,7 @@ export default class AiUsage extends View {
             .text_color(t.muted)
             .cursor_pointer()
             .hover(s => s.bg(t.hover).text_color(t.foreground))
-            .on_click((_e, cx) => { this.nodePath = null; this.nodeMissing = false; this.refresh(cx); })
+            .on_click((_e, cx) => { this.nodePath = null; this.nodeMissing = false; this.refresh(cx, { force: true }); })
             .child(this.loading ? "…" : "↻"),
         ),
       );
