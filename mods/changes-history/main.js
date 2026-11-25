@@ -170,6 +170,10 @@ export default class ChangesHistory extends View {
     this.secStashes = false;
     this.secGraph = false;
     this.hoveredRow = null;
+    const savedH = Number(localStorage.getItem("sc.bottomH"));
+    this.bottomPaneH = Number.isFinite(savedH) && savedH >= 80 && savedH <= 700 ? savedH : 240;
+    this.draggingSplit = null;
+    this.panelHeight = 600;
 
     this.commits = [];
     this.historyLimit = 50;
@@ -1210,6 +1214,23 @@ export default class ChangesHistory extends View {
       .text_size(13)
       .when(Boolean(fontFamily), el => el.font_family(fontFamily))
       .track_focus(this.handle)
+      .on_size_change((size) => {
+        this.panelHeight = size.height / (settings().zoom || 1);
+      })
+      .on_mouse_move((e, cx) => {
+        if (!this.draggingSplit) return;
+        const z = settings().zoom || 1;
+        const dy = ((e.position?.y ?? 0) - this.draggingSplit.startY) / z;
+        const maxH = Math.max(140, this.panelHeight - 220);
+        this.bottomPaneH = Math.round(Math.max(80, Math.min(maxH, this.draggingSplit.startH - dy)));
+        cx.notify();
+      })
+      .on_mouse_up("left", (_e, cx) => {
+        if (!this.draggingSplit) return;
+        this.draggingSplit = null;
+        localStorage.setItem("sc.bottomH", String(this.bottomPaneH));
+        cx.notify();
+      })
       .on_key_down((e, cx) => {
         if (e.key === "escape" && this.typing) {
           this.typing = false;
@@ -1303,20 +1324,20 @@ export default class ChangesHistory extends View {
                 .child(this.actionBtn(t, "sc-note-x", "×", "Dismiss", (_e, cx) => { this.note = null; cx.notify(); })),
             ),
           )
-          // Main scrollable VS Code sections (Staged, Changes, Stashes, Graph)
-          .child(
-            v_flex()
-              .id("sc-sections")
-              .flex_1()
-              .min_h(0)
-              .overflow_y_scrollbar()
-              .py(4)
-              .when(!this.root, e =>
-                e.child(div().p(12).text_size(12).text_color(t.dim).child(this.error || (this.loading ? "Loading…" : "Not a git repository"))),
-              )
-              .when(Boolean(this.root), body =>
-                body
-                  // Staged Changes
+          // Top scrollable section (Staged + Changes) + resizable bottom section (Stashes + Graph)
+          .when(!this.root, e =>
+            e.child(div().flex_1().p(12).text_size(12).text_color(t.dim).child(this.error || (this.loading ? "Loading…" : "Not a git repository"))),
+          )
+          .when(Boolean(this.root), body => {
+            const bottomOpen = this.secStashes || this.secGraph;
+            return body
+              .child(
+                v_flex()
+                  .id("sc-sections")
+                  .flex_1()
+                  .min_h(80)
+                  .overflow_y_scrollbar()
+                  .py(4)
                   .when(this.staged.length > 0, s =>
                     s
                       .child(this.sectionHeader(t, "sec-staged", "Staged Changes", this.secStaged, this.staged.length, (_e, cx) => {
@@ -1325,7 +1346,6 @@ export default class ChangesHistory extends View {
                       }, [this.actionBtn(t, "sc-unstage-all", "−", "Unstage all", (_e, cx) => this.unstageAll(cx))]))
                       .when(this.secStaged, list => list.child(v_flex().px(4).pb(4).children(this.staged.map(f => this.fileRow(f, t))))),
                   )
-                  // Changes (Unstaged)
                   .child(this.sectionHeader(t, "sec-changes", "Changes", this.secChanges, this.unstaged.length, (_e, cx) => {
                     this.secChanges = !this.secChanges;
                     cx.notify();
@@ -1343,17 +1363,45 @@ export default class ChangesHistory extends View {
                           empty.child(div().px(14).py(6).text_size(11.5).text_color(t.dim).child("No uncommitted changes")),
                         ),
                     ),
-                  )
-                  // Stashes
+                  ),
+              )
+              // Draggable horizontal resize divider between Changes and Stashes/Graph
+              .child(
+                div()
+                  .id("sc-split-drag")
+                  .h(6)
+                  .flex_none()
+                  .cursor_row_resize()
+                  .flex()
+                  .items_center()
+                  .hover(s => s.bg(t.accent + "44"))
+                  .when(Boolean(this.draggingSplit), el => el.bg(t.accent + "66"))
+                  .tooltip("Drag up/down to resize Stashes & Graph")
+                  .on_mouse_down("left", (e, cx) => {
+                    cx.stop_propagation();
+                    if (!this.secStashes && !this.secGraph) {
+                      this.secGraph = true;
+                      if (this.historyLoadedFor !== this.root && !this.historyLoading) {
+                        this.loadHistory(cx, true);
+                      }
+                    }
+                    this.draggingSplit = { startY: e.position?.y ?? 0, startH: this.bottomPaneH };
+                    cx.notify();
+                  })
+                  .child(div().w_full().h(1).bg(this.draggingSplit ? t.accent : t.border)),
+              )
+              // Bottom resizable pane (Stashes + Graph)
+              .child(
+                v_flex()
+                  .id("sc-bottom")
+                  .flex_none()
+                  .when(bottomOpen, el => el.h(this.bottomPaneH).overflow_y_scrollbar())
+                  .pb(4)
                   .child(
-                    div()
-                      .mt(2)
-                      .border_t(1)
-                      .border_color(t.border)
-                      .child(this.sectionHeader(t, "sec-stashes", "Stashes", this.secStashes, this.stashes.length, (_e, cx) => {
-                        this.secStashes = !this.secStashes;
-                        cx.notify();
-                      }, [this.actionBtn(t, "sc-stash-add", "+", "Create stash", (_e, cx) => this.stashPush(cx))])),
+                    this.sectionHeader(t, "sec-stashes", "Stashes", this.secStashes, this.stashes.length, (_e, cx) => {
+                      this.secStashes = !this.secStashes;
+                      cx.notify();
+                    }, [this.actionBtn(t, "sc-stash-add", "+", "Create stash", (_e, cx) => this.stashPush(cx))]),
                   )
                   .when(this.secStashes, list =>
                     list.child(
@@ -1383,10 +1431,8 @@ export default class ChangesHistory extends View {
                         ),
                     ),
                   )
-                  // Graph / Commit History
                   .child(
                     div()
-                      .mt(2)
                       .border_t(1)
                       .border_color(t.border)
                       .child(this.sectionHeader(t, "sec-graph", "Graph", this.secGraph, this.commits.length || null, (_e, cx) => {
@@ -1465,8 +1511,8 @@ export default class ChangesHistory extends View {
                         ),
                     ),
                   ),
-              ),
-          )
+              );
+          })
           // Inline Diff preview when a file is clicked
           .when(Boolean(this.open), diffArea =>
             diffArea.child(
