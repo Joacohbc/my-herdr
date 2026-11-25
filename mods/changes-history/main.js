@@ -93,7 +93,8 @@ function statusColor(status, t) {
 }
 
 export default class ChangesHistory extends View {
-  init(_props, cx) {
+  init(initialProps, cx) {
+    this.standaloneCommit = Boolean(initialProps?.commit && initialProps?.root);
     this.branch = "";
     this.staged = [];
     this.unstaged = [];
@@ -126,17 +127,26 @@ export default class ChangesHistory extends View {
     this.commitGutterChars = 4;
     this.commitDetailLoading = false;
 
-    this.input = InputState.new({ placeholder: "Message (Enter to commit)" });
-    this.input.on("change", (_e, cx) => {
-      const hadMessage = Boolean(this.message.trim());
-      this.message = this.input.value();
-      if (hadMessage !== Boolean(this.message.trim())) cx.notify();
-    });
-    this.input.on("submit", (_e, cx) => this.commit(cx));
-    this.input.on("focus", (_e, cx) => { this.typing = true; cx.notify(); });
-    this.input.on("blur", (_e, cx) => { this.typing = false; cx.notify(); });
+    if (!this.standaloneCommit) {
+      this.input = InputState.new({ placeholder: "Message (Enter to commit)" });
+      this.input.on("change", (_e, cx) => {
+        const hadMessage = Boolean(this.message.trim());
+        this.message = this.input.value();
+        if (hadMessage !== Boolean(this.message.trim())) cx.notify();
+      });
+      this.input.on("submit", (_e, cx) => this.commit(cx));
+      this.input.on("focus", (_e, cx) => { this.typing = true; cx.notify(); });
+      this.input.on("blur", (_e, cx) => { this.typing = false; cx.notify(); });
+    }
 
     if (checking()) return;
+    if (this.standaloneCommit) {
+      this.root = initialProps.root;
+      this.on = initialProps.on ?? null;
+      this.context = { key: `commit:${initialProps.commit.hash}`, on: this.on, dirtyAt: 0 };
+      this.openCommit(initialProps.commit, cx);
+      return;
+    }
     this.refresh(cx);
     cx.timer.every(500, cx => this.refreshIfDue(cx));
   }
@@ -179,6 +189,7 @@ export default class ChangesHistory extends View {
   }
 
   current(context) {
+    if (this.standaloneCommit) return this.context === context;
     return this.context === context && key() === context.key;
   }
 
@@ -531,6 +542,19 @@ export default class ChangesHistory extends View {
     cx.notify();
   }
 
+  openCommitInNewTab(commit) {
+    if (!commit || !this.root) return;
+    const tabTitle = `${commit.shortHash} ${commit.subject}`.slice(0, 32);
+    const res = run("tab.new", {
+      name: tabTitle,
+      mod: "changes-history",
+      props: { commit, root: this.root, on: this.on ?? null },
+    });
+    if (res?.pane) {
+      run("pane.rename", { pane: res.pane, name: `${commit.shortHash} · ${commit.subject}` });
+    }
+  }
+
   openCommit(commit, cx) {
     this.selectedCommit = commit;
     this.commitFiles = [];
@@ -735,17 +759,19 @@ export default class ChangesHistory extends View {
             h_flex()
               .gap(6)
               .items_center()
-              .child(this.actionBtn(t, "hist-back", "←", "Back to Source Control", (_e, cx) => {
-                this.selectedCommit = null;
-                this.commitFiles = [];
-                this.commitOpenFile = null;
-                this.setCommitLines([]);
-                cx.notify();
-              }))
+              .when(!this.standaloneCommit, el =>
+                el.child(this.actionBtn(t, "hist-back", "←", "Back to Source Control", (_e, cx) => {
+                  this.selectedCommit = null;
+                  this.commitFiles = [];
+                  this.commitOpenFile = null;
+                  this.setCommitLines([]);
+                  cx.notify();
+                })),
+              )
               .child(div().px(5).py(1).rounded(4).bg(t.selected).text_size(11).font_semibold().text_color(t.accent).child(c.shortHash))
               .child(div().flex_1().min_w(0).truncate().font_medium().text_size(12).text_color(t.foreground).child(c.subject)),
           )
-          .child(div().pl(24).text_size(11).text_color(t.dim).child(`${c.author} · ${c.relDate} · ${this.commitFiles.length} file${this.commitFiles.length === 1 ? "" : "s"}`)),
+          .child(div().pl(this.standaloneCommit ? 4 : 24).text_size(11).text_color(t.dim).child(`${c.author} · ${c.relDate} · ${this.commitFiles.length} file${this.commitFiles.length === 1 ? "" : "s"}`)),
       )
       .child(
         div()
@@ -824,11 +850,21 @@ export default class ChangesHistory extends View {
   }
 
   render(cx) {
+    const t = theme(), size = settings().font_size;
+    if (this.standaloneCommit && this.selectedCommit) {
+      return v_flex()
+        .id("changes-commit-tab")
+        .size_full()
+        .min_h(0)
+        .bg(t.background)
+        .text_color(t.foreground)
+        .text_size(13)
+        .child(this.renderCommitDetail(t, size));
+    }
     if (!checking()) {
       if (key() !== this.context?.key) this.refresh(cx);
       else this.refreshIfDue(cx);
     }
-    const t = theme(), size = settings().font_size;
     const totalChanges = this.staged.length + this.unstaged.length;
     const canCommit = Boolean(this.message.trim() && this.root && !this.busy && !this.loading && totalChanges > 0);
 
@@ -1053,8 +1089,14 @@ export default class ChangesHistory extends View {
                               .rounded(6)
                               .cursor_pointer()
                               .hover(s => s.bg(t.hover))
-                              .tooltip(`${c.shortHash} · ${c.subject}\n${c.author} · ${c.relDate}`)
-                              .on_click((_e, cx) => this.openCommit(c, cx))
+                              .tooltip(`${c.shortHash} · ${c.subject}\n${c.author} · ${c.relDate}\nCtrl+Click: open in new tab`)
+                              .on_click((e, cx) => {
+                                if (e?.modifiers?.control || e?.modifiers?.platform) {
+                                  this.openCommitInNewTab(c);
+                                } else {
+                                  this.openCommit(c, cx);
+                                }
+                              })
                               .child(div().size(7).flex_none().rounded(999).bg(c.refs.length ? t.ansi2 : t.accent))
                               .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.foreground).child(c.subject))
                               .when(c.refs.length > 0, el =>
