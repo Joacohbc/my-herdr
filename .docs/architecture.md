@@ -2,7 +2,7 @@
 
 ## 1. Visión General
 
-`my-herdr` es un repositorio Git (`/home/joaco/projects/my-herdr`) que concentra toda la personalización de **Herdr App** (`herdr-app`, interfaz nativa en Rust/GPUI) sobre la máquina local y hosts SSH conectados a `herdr-core` (`rbpil`, `rbpi8gbl`). El script `install.sh` enlaza mediante symlinks el layout y los 9 mods personalizados dentro de `~/.config/herdr-app/` y sincroniza `~/.config/herdr-app/keys.json`.
+`my-herdr` es un repositorio Git (`/home/joaco/projects/my-herdr`) que concentra toda la personalización de **Herdr App** (`herdr-app`, interfaz nativa en Rust/GPUI) sobre la máquina local y hosts SSH conectados a `herdr-core` (`rbpil`, `rbpi8gbl`). El script `install.sh` enlaza mediante symlinks el layout, `command-aliases.json` y los 10 mods personalizados dentro de `~/.config/herdr-app/` y sincroniza `~/.config/herdr-app/keys.json`.
 
 ```text
 root (row)
@@ -41,6 +41,8 @@ Los mods de Herdr corren en contextos aislados dentro de `gpui-shell` y se comun
 | `changes.badge` | `changes-history` | `tabs-custom` | `{ count, space }`. Contador de archivos con cambios sin commitear para el badge flotante del botón `Changes`. |
 | `herdr.gc` | `system-monitor` | `files-search`, `file-viewer`, `changes-history`, `ports-monitor` | `{ seq, at, reason }`. Señal de limpieza global que dispara evicción inmediata de cachés e hibernación de pestañas inactivas. |
 | `tiling.closedPanes` / `tiling.closedTabs` | `pane-custom` | `pane-custom` | Pilas acotadas a 8 elementos deduplicados para `pane-custom.reopen_pane` y `pane-custom.reopen_tab` (`Ctrl + Shift + T`). |
+| `files-search.refresh` | `command-palette` | `files-search` | `{ seq, expand, root, on }`. Notifica al árbol de `Files` tras crear un archivo/carpeta para refrescar y expandir automáticamente la ruta padre. |
+| `command-palette.recent` | `command-palette` | `command-palette` | Historial acotado (máx. `10`) de comandos ejecutados recientemente mediante el prefijo `>`. |
 
 ---
 
@@ -59,7 +61,7 @@ Cada mod gestiona su memoria en tres capas complementarias:
 
 ---
 
-## 4. Decisiones de Arquitectura (`D1`–`D15`)
+## 4. Decisiones de Arquitectura (`D1`–`D16`)
 
 | ID | Decisión | Alternativa descartada y motivo |
 | --- | --- | --- |
@@ -78,3 +80,4 @@ Cada mod gestiona su memoria en tres capas complementarias:
 | **D13** | Integrar búsqueda e inspección de Pull Requests de GitHub en `mods/changes-history/github.js` mediante `gh` CLI bajo demanda (carga perezosa al abrir la sección `Pull Requests`). | Consumir la API REST/GraphQL manualmente exigiría almacenar tokens propios y duplicar autenticación; `gh` reutiliza el keyring local y funciona de forma transparente en repositorios SSH vía `exec(..., { cwd, on })` sin consumo en segundo plano cuando la sección está cerrada. |
 | **D14** | Reemplazar cualquier intento de navegador embebido por el popup ligero `mods/web-launcher/` (abierto desde el botón `Web` de `tabs-custom`), con detección automática de URL en el portapapeles, selector de perfiles reales de Chrome (`~/.config/google-chrome/Local State`) + `Clean` efímero, y lanzamiento como pestaña normal o ventana `--app`. | GPUI (`gpui-kit`) carece de WebView nativo; renderizar páginas por capturas JPEG no reemplaza la fluidez/audio de un navegador real y consume procesos extra. Un lanzador popup efímero aporta cero RAM en reposo y acceso en un clic al navegador real con el perfil deseado. |
 | **D15** | Incorporar `mods/ports-monitor/` como bloque independiente en la barra lateral izquierda (junto a `system-monitor` y `agents-custom`), haciendo que los tres bloques soporten colapso/modo compacto vía `layout.resize` y deteniendo por completo el polling de `system-monitor` y `ports-monitor` cuando están minimizados. | Unificar puertos dentro de `system-monitor` saturaría el panel y acoplaría dos responsabilidades distintas; mantenerlos separados con colapso real y pausa de muestreo (`ss`/`ps`) garantiza bajo consumo de CPU/RAM y máximo espacio útil en el sidebar. |
+| **D16** | Enlazar `Ctrl + Shift + P` al overlay efímero `mods/command-palette/` con soporte de prefijo `>`, aliases configurables en `command-aliases.json` y diálogo de creación/edición rápida (`micro`/`nano`), manteniendo además entradas `"palette"` en los `mod.json` para compatibilidad con `app.palette`. | La paleta nativa `app.palette` solo filtra comandos estáticos y no permite interceptar `>` para ejecutar comandos arbitrarios en terminal ni cargar aliases desde un archivo externo configurable. Un overlay efímero (`"place": "none"`) consume cero RAM en reposo y funciona incluso cuando el panel `Files` está oculto. |

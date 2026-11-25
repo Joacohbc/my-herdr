@@ -1,0 +1,32 @@
+{
+  "aliases": [
+    {
+      "name": "htop",
+      "command": "htop",
+      "description": "Interactive process viewer",
+      "place": "tab",
+      "keepOpen": false
+    },
+    {
+      "name": "git-log",
+      "command": "git log --oneline --graph --decorate -n 25",
+      "description": "Recent Git commit graph",
+      "place": "right",
+      "keepOpen": true
+    },
+    {
+      "name": "docker-ps",
+      "command": "docker ps --format 'table {{.Names}}\\t{{.Status}}\\t{{.Ports}}'",
+      "description": "List running Docker containers",
+      "place": "right",
+      "keepOpen": true
+    },
+    {
+      "name": "ports",
+      "command": "ss -tulnp",
+      "description": "Inspect listening sockets",
+      "place": "right",
+      "keepOpen": true
+    }
+  ]
+}

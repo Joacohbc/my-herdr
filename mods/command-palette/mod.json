@@ -1,0 +1,23 @@
+{
+  "place": "none",
+  "title": "Command Palette",
+  "focusable": true,
+  "overlay": {
+    "kind": "popup",
+    "at": "top",
+    "offset": 44,
+    "width": 640,
+    "height": 480
+  },
+  "palette": [
+    {
+      "title": "Command Palette & Runner (>)",
+      "command": "mod.open",
+      "args": {
+        "name": "command-palette"
+      },
+      "group": "Command",
+      "words": "run exec shell alias create file folder micro nano >"
+    }
+  ]
+}

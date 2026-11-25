@@ -19,7 +19,8 @@ Explorador de archivos perezoso con buscador estilo VS Code e iconos oficiales d
   - Clic normal: abre en `file-viewer` dentro de la pestaña actual (reutiliza visor existente o hace split a la derecha).
   - `Ctrl + clic`: abre en nueva pestaña dedicada (`solo: true`).
   - `Shift + clic`: abre un split adicional de `file-viewer`.
-  - **Clic derecho:** abre menú contextual popup (`Copy Relative Path`, `Copy Absolute Path`, `Copy Name`, `Open in New Tab`) usando `cx.write_to_clipboard()`.
+  - **Creación y edición rápida:** botones `+File` y `+Dir` en la barra superior (crean en la raíz del espacio activo vía `command-palette`) y reacción automática a `shared("files-search.refresh")` para refrescar y expandir carpetas padre.
+  - **Clic derecho:** abre menú contextual popup (`New File…`, `New Folder…`, `Copy Relative Path`, `Copy Absolute Path`, `Copy Name`, `Open in New Tab` y `Edit in Terminal (micro/nano)` con autodetección local/SSH).
 - **Límites de RAM:** `PER_FOLDER = 250`, `TOTAL = 1500`, `MAX_OPEN_FOLDERS = 24` (LRU), `MAX_SAVED_CONTEXTS = 8` (máx. 10 carpetas), `MAX_SCANS = 4`, evicción automática tras `30 s` oculto o señal `herdr.gc`.
 
 ### 1.2 `file-viewer` (`mods/file-viewer/`)
@@ -97,13 +98,23 @@ Clon personalizado del panel `agents` de la barra lateral izquierda.
 - **Archivos:** `main.js`, `mod.json`.
 - **Funcionalidades:** conserva agrupación/prioridad, sub-agentes y pines del mod nativo, hereda la fuente global (**D11**) y añade un **modo compacto vertical** (al pulsar `Agents ▾` o achicar el panel a `< 86 px`, `min: 60 px`) que muestra solo los iconos de los agentes uno al lado del otro con borde/punto de color según estado (`working`, `blocked`, `done`, `idle`).
 
+### 1.10 `command-palette` (`mods/command-palette/`)
+Paleta de comandos unificada (`Ctrl + Shift + P`), ejecutor de comandos en terminal con prefijo `>`, gestor de aliases configurables y diálogo de creación/edición rápida (`micro`/`nano`).
+
+- **Archivos:** `main.js`, `actions.js`, `mod.json` (`"place": "none"`, `"focusable": true`, popup superior `640×480`, cero RAM en reposo).
+- **Funcionalidades:**
+  - **Modo Comandos (por defecto):** reúne todos los comandos nativos de `commands()` con sus atajos reales de `keys()`, más acciones personalizadas de `my-herdr` (`Open Web Launcher`, `Create File`, `Create Folder`, `Quick Edit in Terminal (micro / nano)`, `Run Command (> )`, `Edit Command Aliases`, `Close tab`, `Reopen closed tab`).
+  - **Modo Ejecutor (`>`):** al escribir `>` (o pulsar `> Run`), filtra aliases cargados de `~/.config/herdr-app/command-aliases.json` (máx. `100`) y comandos recientes (`shared("command-palette.recent")`, máx. `10`). Permite ejecutar comandos arbitrarios o aliases en una nueva terminal (`Enter` según destino configurado `Tab`/`Split →`, `Shift + Enter` en split derecho, toggle `Keep open` / `Auto-close`), añadir nuevos aliases inline (`+ Add Alias`) o abrir `command-aliases.json` en `file-viewer` (`Edit JSON`).
+  - **Creación y edición rápida (`micro`/`nano`):** crea archivos o carpetas con soporte de rutas anidadas (`mkdir -p --`, argumentos posicionales `"$1"`, validación contra `..`, compatible con local y SSH) y autodetecta `micro` → `nano` → `vi` en la máquina destino para abrir el archivo directamente en terminal.
+
 ---
 
 ## 2. Scripts y Configuración (`scripts/`, `install.sh`, `layouts/`)
 
 | Archivo | Propósito |
 | --- | --- |
-| `install.sh` | Crea los symlinks de `layouts/my-herdr.json` y los 9 mods hacia `~/.config/herdr-app/`, ejecuta `scripts/apply-keys.js` y valida todos los mods con `herdr-app check`. |
-| `scripts/apply-keys.js` | Sincroniza atajos de flechas (`Alt + ←/↓/↑/→`, `Alt + Shift + ←/↓/↑/→`) y pestañas (`Ctrl+T`, `Ctrl+W`, `Ctrl+Shift+T`) en `"global"`, `"layout:my-herdr"` y `"terminal"` dentro de `~/.config/herdr-app/keys.json`. |
+| `install.sh` | Crea los symlinks de `layouts/my-herdr.json`, `command-aliases.json` y los 10 mods hacia `~/.config/herdr-app/`, ejecuta `scripts/apply-keys.js` y valida todos los mods con `herdr-app check`. |
+| `command-aliases.json` | Lista configurable de aliases (`{ name, command, description, place, keepOpen }`) consumida por `command-palette` en modo `>`. |
+| `scripts/apply-keys.js` | Sincroniza atajos de flechas (`Alt + ←/↓/↑/→`, `Alt + Shift + ←/↓/↑/→`), pestañas (`Ctrl+T`, `Ctrl+W`, `Ctrl+Shift+T`) y paleta (`Ctrl+Shift+P` → `mod.open:command-palette`) en `"global"`, `"layout:my-herdr"` y `"terminal"` dentro de `~/.config/herdr-app/keys.json`. |
 | `scripts/build-icons.js` | Compacta el mapa de Material Icon Theme desde `mods/files-search/material-icons.js` a tablas invertidas perezosas con `releaseIconCache()` para `files-search` (archivos + carpetas) y `changes-history` (solo archivos). |
 | `layouts/my-herdr.json` | Definición del árbol de layout activo en Herdr App. |

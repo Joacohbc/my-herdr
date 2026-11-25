@@ -199,6 +199,7 @@ export default class FilesSearch extends View {
     this.hiddenSince = 0;
     this.evicted = false;
     this.lastGcSeq = shared("herdr.gc")?.seq ?? 0;
+    this.lastRefreshSeq = shared("files-search.refresh")?.seq ?? 0;
 
     if (checking()) return;
     if (isFilesPanelVisible()) this.refresh(cx);
@@ -333,12 +334,32 @@ export default class FilesSearch extends View {
     this.hiddenSince = 0;
     this.evicted = false;
 
+    const refreshSignal = shared("files-search.refresh");
+    const refreshSeq = refreshSignal?.seq ?? 0;
+    const externalRefresh = refreshSeq !== this.lastRefreshSeq;
+    if (externalRefresh) {
+      this.lastRefreshSeq = refreshSeq;
+      if (refreshSignal?.expand) {
+        const parts = String(refreshSignal.expand).split("/").filter(Boolean);
+        let acc = "";
+        for (const part of parts) {
+          acc = acc ? `${acc}/${part}` : part;
+          this.folders.add(acc);
+        }
+      }
+      if (this.context) this.context.catchUp = true;
+    }
+
     const active = window()?.active !== false, context = this.context;
     const refocused = active && this.windowActive === false;
     this.windowActive = active;
     if (!context || wasEvicted) {
       this.refresh(cx);
       if (wasEvicted && this.query.trim()) this.scheduleSearch(cx, true);
+      return;
+    }
+    if (externalRefresh) {
+      this.refresh(cx);
       return;
     }
     if (refocused && (context.dirtyAt || !context.watch)) context.catchUp = true;
@@ -502,21 +523,42 @@ export default class FilesSearch extends View {
     cx.notify();
   }
 
+  openCreateModal(mode, baseDir = "") {
+    if (!this.root) {
+      notify({ title: "No active folder", body: "Focus a space with a folder first.", level: "warning", timeout: 2200 });
+      return;
+    }
+    openOverlay({
+      mod: "command-palette",
+      kind: "dialog",
+      width: 520,
+      height: 260,
+      props: {
+        mode,
+        baseDir,
+        root: this.root,
+        on: this.on ?? null,
+      },
+    });
+  }
+
   openContextMenu(relPath, isDir) {
     if (!relPath || !this.root) return;
     const absPath = `${this.root.replace(/\/+$/, "")}/${relPath}`;
     const name = relPath.split(/[\\/]/).pop() || relPath;
+    const parentDir = relPath.includes("/") ? relPath.slice(0, relPath.lastIndexOf("/")) : "";
     openOverlay({
       mod: "files-search",
       kind: "popup",
-      width: 215,
-      height: isDir ? 104 : 138,
+      width: 228,
+      height: isDir ? 174 : 238,
       props: {
         menu: {
           relPath,
           absPath,
           name,
           isDir: Boolean(isDir),
+          baseDir: isDir ? relPath : parentDir,
           root: this.root,
           on: this.on ?? null,
         },
@@ -531,6 +573,21 @@ export default class FilesSearch extends View {
       cx.write_to_clipboard(value);
       if (overlay) closeOverlay(overlay);
       notify({ title: label, body: value, timeout: 1800 });
+    };
+    const openCreateFromMenu = mode => {
+      if (overlay) closeOverlay(overlay);
+      openOverlay({
+        mod: "command-palette",
+        kind: "dialog",
+        width: 520,
+        height: 260,
+        props: {
+          mode,
+          baseDir: m.baseDir ?? "",
+          root: m.root,
+          on: m.on ?? null,
+        },
+      });
     };
     const menuItem = (id, label, onClick) =>
       h_flex()
@@ -554,6 +611,9 @@ export default class FilesSearch extends View {
       .bg(t.popover ?? t.surface)
       .text_color(t.foreground)
       .when(Boolean(fontFamily), el => el.font_family(fontFamily))
+      .child(menuItem("ctx-new-file", "New File…", () => openCreateFromMenu("create-file")))
+      .child(menuItem("ctx-new-folder", "New Folder…", () => openCreateFromMenu("create-folder")))
+      .child(div().h(1).my(2).bg(t.border))
       .child(menuItem("ctx-copy-rel", "Copy Relative Path", (_e, cx) => copyAndClose("Relative path copied", m.relPath, cx)))
       .child(menuItem("ctx-copy-abs", "Copy Absolute Path", (_e, cx) => copyAndClose("Absolute path copied", m.absPath, cx)))
       .child(menuItem("ctx-copy-name", "Copy Name", (_e, cx) => copyAndClose("Name copied", m.name, cx)))
@@ -569,6 +629,28 @@ export default class FilesSearch extends View {
                 props: { file: m.relPath, root: m.root, on: m.on, tab: null, solo: true },
               });
               if (res?.pane) run("pane.rename", { pane: res.pane, name: m.name });
+            }),
+          )
+          .child(
+            menuItem("ctx-edit-terminal", "Edit in Terminal (micro/nano)", (_e, cx) => {
+              if (overlay) closeOverlay(overlay);
+              cx.spawn(async () => {
+                let editor = "nano";
+                try {
+                  const r = await exec(
+                    "sh",
+                    ["-c", 'for ed in micro nano vi; do if command -v "$ed" >/dev/null 2>&1; then printf "%s" "$ed"; exit 0; fi; done; exit 1'],
+                    { on: m.on ?? null, timeout: 4000 },
+                  );
+                  if (r.code === 0 && r.stdout.trim()) editor = r.stdout.trim();
+                } catch {}
+                run("terminal.open", {
+                  argv: [editor, m.absPath],
+                  folder: m.root,
+                  place: "tab",
+                  name: `${editor}: ${m.name}`,
+                });
+              });
             }),
           ),
       );
@@ -1027,13 +1109,51 @@ export default class FilesSearch extends View {
         h_flex()
           .h(42)
           .flex_none()
-          .px(14)
-          .gap(8)
+          .px(12)
+          .gap(6)
           .items_center()
           .border_b(1)
           .border_color(t.border)
           .child(div().font_semibold().child("Files"))
-          .child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(t.dim).child(headerRight)),
+          .child(div().flex_1().min_w(0).truncate().text_right().text_size(11.5).text_color(t.dim).child(headerRight))
+          .child(
+            div()
+              .id("files-btn-new-file")
+              .px(6)
+              .py(3)
+              .flex_none()
+              .rounded(5)
+              .bg(t.surface)
+              .border_1()
+              .border_color(t.border)
+              .text_size(11)
+              .font_medium()
+              .text_color(t.muted)
+              .cursor_pointer()
+              .tooltip("New File")
+              .hover(s => s.bg(t.hover).text_color(t.foreground))
+              .on_click(() => this.openCreateModal("create-file", ""))
+              .child("+File"),
+          )
+          .child(
+            div()
+              .id("files-btn-new-folder")
+              .px(6)
+              .py(3)
+              .flex_none()
+              .rounded(5)
+              .bg(t.surface)
+              .border_1()
+              .border_color(t.border)
+              .text_size(11)
+              .font_medium()
+              .text_color(t.muted)
+              .cursor_pointer()
+              .tooltip("New Folder")
+              .hover(s => s.bg(t.hover).text_color(t.foreground))
+              .on_click(() => this.openCreateModal("create-folder", ""))
+              .child("+Dir"),
+          ),
       )
       .child(this.renderSearchBar(t))
       .when(isSearching && this.searchMode === "content", body => body.child(this.renderContentResults(t)))

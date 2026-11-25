@@ -26,6 +26,7 @@ const tabBindings = {
   "ctrl-t": "tab.new",
   "ctrl-w": "pane-custom.close_tab",
   "ctrl-shift-t": "pane-custom.reopen_tab",
+  "ctrl-shift-p": "mod.open:command-palette",
 };
 
 Object.assign(keys.global, {
