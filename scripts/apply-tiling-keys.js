@@ -55,10 +55,20 @@ const tilingBindings = {
   [`${base}-]`]: { command: "tab.move", args: { by: 1 } },
 };
 
+keys.global = {
+  ...(keys.global || {}),
+  [leader]: "mod.open:tiling-mode",
+};
+
+keys.terminal = {
+  ...(keys.terminal || {}),
+  [leader]: "mod.open:tiling-mode",
+};
+
 keys[sectionKey] = {
   ...(keys[sectionKey] || {}),
   ...tilingBindings,
 };
 
 writeFileSync(keysPath, JSON.stringify(keys, null, 2) + "\n", "utf8");
-console.log(`Applied ${Object.keys(tilingBindings).length} tiling shortcuts under "${sectionKey}" (base: ${base}, leader: ${leader})`);
+console.log(`Applied ${Object.keys(tilingBindings).length} tiling shortcuts under "${sectionKey}" + global/terminal leader "${leader}" (base: ${base})`);
