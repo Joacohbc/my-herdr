@@ -58,16 +58,11 @@ Para el inventario completo de archivos, mods, repositorios de iconos y arquitec
 - En paneles `file-viewer`, `−` / `%` / `+` y `Ctrl + ruedita` ajustan el zoom del visor (`fontDelta` vía `shared("file-viewer.cmd")`); en terminales ajustan `app.zoom_out` / `app.zoom_reset` / `app.zoom_in`.
 - `pane-custom` también escucha `nextCommand()` en el panel enfocado para cerrar y reabrir panes/tabs con historial (`close_pane`, `reopen_pane`, `close_tab`, `reopen_tab`).
 
-### Tiling Manager (`tiling-mode` + `tiling-config.json`)
-- La tecla base (`base_modifier`, por defecto `ctrl-alt`) y la tecla líder (`leader_key`, por defecto `ctrl-space`) se configuran en un único archivo `tiling-config.json` y se aplican en `"layout:my-herdr"` de `keys.json` vía `scripts/apply-tiling-keys.js`.
-- Atajos directos obligatorios con `Base`:
-  - `Base + flechas` (o `h/j/k/l`): mover foco (`pane.go`)
-  - `Base + Shift + flechas` (o `H/J/K/L`): mover/intercambiar paneles (`pane.swap`)
-  - `Base + v / s / z`: split derecha, split abajo, zoom
-  - `Base + q` / `Base + Shift + q`: cerrar panel actual / reabrir último panel cerrado
-  - `Base + w` / `Base + Shift + w`: cerrar tab actual / reabrir última tab cerrada
-  - `Base + [` / `]`: mover tab izquierda/derecha
-  - `Ctrl + Space` (o `Base + r`): abrir el HUD modal `tiling-mode` (navegación, swap, modo Resize con flechas `r`, splits, cerrar/reabrir).
+### Atajos de Tabs (`scripts/apply-keys.js`)
+- `Ctrl + T`: crear nueva tab (`tab.new`).
+- `Ctrl + W`: cerrar tab actual guardándola en el historial (`pane-custom.close_tab`).
+- `Ctrl + Shift + T`: reabrir última tab cerrada (`pane-custom.reopen_tab`).
+- Aplicados en `"layout:my-herdr"` y `"terminal"` dentro de `~/.config/herdr-app/keys.json`.
 
 ### Panel de cambios, Stash e historial Git estilo VS Code (`changes-history`)
 - Diseño estilo **VS Code Source Control**:

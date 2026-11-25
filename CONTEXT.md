@@ -102,14 +102,11 @@ Clon del encabezado `pane` aplicado a todos los paneles del layout `my-herdr`.
 
 ---
 
-### 4.5 `tiling-mode` (`~/.config/herdr-app/mods/tiling-mode/` + `tiling-config.json`)
-Modo Tiling Manager & Resize HUD activado con `Ctrl+Space` (o `Ctrl+Alt+R`), más atajos directos configurables desde `tiling-config.json` vía `scripts/apply-tiling-keys.js`.
-
-| Archivo | Responsabilidad |
-|---|---|
-| `tiling-config.json` | Define `base_modifier` (`ctrl-alt`), `leader_key` (`ctrl-space`), `layout` y `resize_step_px` |
-| `scripts/apply-tiling-keys.js` | Aplica los atajos en `"layout:my-herdr"` dentro de `~/.config/herdr-app/keys.json` sin alterar el resto |
-| `mods/tiling-mode/main.js` | HUD flotante modal con modo **Tiling** (flechas foco, `Shift+flechas` swap, `Ctrl+flechas` resize, `v/s/z/q/Q/w/W/[/]/{/}/n`) y modo **Resize** (`r` + flechas ±40px, `Shift` ±16px, `Ctrl` ±90px) |
+### 4.5 Atajos de Tabs (`scripts/apply-keys.js`)
+Aplica en `~/.config/herdr-app/keys.json` (`"layout:my-herdr"` y `"terminal"`):
+- `Ctrl + T` → `tab.new` (nueva tab)
+- `Ctrl + W` → `pane-custom.close_tab` (cerrar tab actual y guardar en historial)
+- `Ctrl + Shift + T` → `pane-custom.reopen_tab` (reabrir última tab cerrada)
 
 ---
 
