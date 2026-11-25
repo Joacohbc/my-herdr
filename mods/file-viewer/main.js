@@ -15,6 +15,8 @@ import {
 
 const MAX_FILE_CHARS = 250_000;
 const CSV_PAGE_SIZE = 200;
+const MAX_UNIQUE_SUGGESTIONS = 200;
+const MAX_UNIQUE_SCAN_ROWS = 2500;
 const HIBERNATE_IDLE_MS = 45_000;
 const IDLE_CHECK_MS = 15_000;
 
@@ -107,19 +109,24 @@ export default class FileViewer extends View {
     this.csvSortDir = 0;
     this.csvSelected = null;
     this.csvEditedCells = new Set();
+    this.csvUniqueCache?.clear();
     this.csvDirty = false;
     this.csvSaving = false;
     this.csvSaveError = null;
     this.csvViewRows = [];
     this.csvPage = 0;
     this.csvColFilters = new Map();
+    this.csvUniqueCache = new Map();
     this.csvFilterMenuCol = -1;
     this.csvMenuQuery = "";
-    this.csvFilterInput = InputState.new({ placeholder: "Search all columns (or Col:value)…" });
+    this.csvFilterInput = InputState.new({ placeholder: "Search or @Col:val1,val2…" });
     this.csvFilterInput.on("change", (_e, cx) => {
       this.csvFilter = this.csvFilterInput.value();
       this.rebuildCsvViewRows();
       cx.notify();
+    });
+    this.csvFilterInput.on("submit", (_e, cx) => {
+      this.acceptTopCsvSuggestion(cx);
     });
     this.csvMenuInput = InputState.new({ placeholder: "Search values…" });
     this.csvMenuInput.on("change", (_e, cx) => {
@@ -171,10 +178,12 @@ export default class FileViewer extends View {
     this.csvViewRows = [];
     this.csvPage = 0;
     this.csvColFilters = new Map();
+    this.csvUniqueCache = new Map();
     this.csvFilterMenuCol = -1;
     this.csvMenuQuery = "";
     this.csvSelected = null;
     this.csvEditedCells = new Set();
+    this.csvUniqueCache?.clear();
     this.csvDirty = false;
     this.csvSaveError = null;
     if (this.imageRelPath) {
@@ -646,27 +655,209 @@ export default class FileViewer extends View {
       );
   }
 
+  findCsvColIndex(token) {
+    const tbl = this.csvTable;
+    if (!tbl || !token) return -1;
+    const clean = token.replace(/^@/, "").trim().toLowerCase();
+    if (!clean) return -1;
+    for (let c = 0; c < tbl.colCount; c++) {
+      if (columnLetter(c).toLowerCase() === clean || (tbl.headers[c] || "").toLowerCase() === clean) {
+        return c;
+      }
+    }
+    return -1;
+  }
+
+  parseCsvSearchTokens() {
+    const raw = (this.csvFilter || "").trim();
+    if (!raw) return { colRules: [], textTerms: [] };
+    const colRules = [];
+    const textTerms = [];
+    const parts = raw.split(/\s+/).filter(Boolean);
+    for (const part of parts) {
+      const colon = part.indexOf(":");
+      if (colon > 0) {
+        const colIdx = this.findCsvColIndex(part.slice(0, colon));
+        if (colIdx >= 0) {
+          const vals = part
+            .slice(colon + 1)
+            .split(",")
+            .map(v => v.trim().toLowerCase())
+            .filter(Boolean);
+          if (vals.length > 0) colRules.push({ colIdx, vals });
+          continue;
+        }
+      }
+      if (part.startsWith("@")) continue;
+      textTerms.push(part.toLowerCase());
+    }
+    return { colRules, textTerms };
+  }
+
+  getCsvAutocompleteState() {
+    const tbl = this.csvTable;
+    const raw = this.csvFilter || "";
+    if (!tbl || !raw) return null;
+    const match = /(?:^|\s)(@[^\s]*|[A-Za-z0-9_.-]+:[^\s]*)$/.exec(raw);
+    if (!match) return null;
+    const token = match[1];
+    const tokenStart = raw.length - token.length;
+    const prefix = raw.slice(0, tokenStart);
+    const colon = token.indexOf(":");
+
+    if (colon === -1) {
+      if (!token.startsWith("@")) return null;
+      const needle = token.slice(1).toLowerCase();
+      const cols = [];
+      for (let c = 0; c < tbl.colCount; c++) {
+        const letter = columnLetter(c);
+        const header = tbl.headers[c] || letter;
+        if (!needle || letter.toLowerCase().includes(needle) || header.toLowerCase().includes(needle)) {
+          cols.push({ colIdx: c, letter, header });
+        }
+      }
+      return { mode: "columns", prefix, cols: cols.slice(0, 12) };
+    }
+
+    const colToken = token.slice(0, colon);
+    const colIdx = this.findCsvColIndex(colToken);
+    if (colIdx < 0) return null;
+    const rhs = token.slice(colon + 1);
+    const segs = rhs.split(",");
+    const currentPartial = (segs[segs.length - 1] || "").toLowerCase();
+    const committed = segs.slice(0, -1).map(s => s.trim()).filter(Boolean);
+    const selectedLower = new Set(committed.map(s => s.toLowerCase()));
+    const allVals = this.uniqueValuesForCol(colIdx);
+    const values = allVals
+      .filter(v => !currentPartial || v.value.toLowerCase().includes(currentPartial))
+      .slice(0, 16);
+
+    return {
+      mode: "values",
+      prefix,
+      colIdx,
+      colName: tbl.headers[colIdx] || columnLetter(colIdx),
+      colToken: colToken.startsWith("@") ? colToken : `@${colToken}`,
+      committed,
+      selectedLower,
+      values,
+    };
+  }
+
+  applyColumnSuggestion(ac, col, cx) {
+    const name = col.header.includes(" ") ? col.letter : col.header;
+    const next = `${ac.prefix}@${name}:`;
+    this.csvFilter = next;
+    this.csvFilterInput.set_value(next);
+    this.rebuildCsvViewRows();
+    cx.notify();
+  }
+
+  toggleValueSuggestion(ac, valStr, cx) {
+    const lower = valStr.toLowerCase();
+    const nextVals = [...ac.committed];
+    const existingIdx = nextVals.findIndex(v => v.toLowerCase() === lower);
+    if (existingIdx >= 0) nextVals.splice(existingIdx, 1);
+    else nextVals.push(valStr);
+    const next = `${ac.prefix}${ac.colToken}:${nextVals.join(",")}`;
+    this.csvFilter = next;
+    this.csvFilterInput.set_value(next);
+    this.rebuildCsvViewRows();
+    cx.notify();
+  }
+
+  acceptTopCsvSuggestion(cx) {
+    const ac = this.getCsvAutocompleteState();
+    if (!ac) return;
+    if (ac.mode === "columns" && ac.cols.length > 0) {
+      this.applyColumnSuggestion(ac, ac.cols[0], cx);
+    } else if (ac.mode === "values" && ac.values.length > 0) {
+      this.toggleValueSuggestion(ac, ac.values[0].value, cx);
+    }
+  }
+
+  renderCsvAutocompleteBar(t) {
+    const ac = this.getCsvAutocompleteState();
+    if (!ac) return null;
+
+    if (ac.mode === "columns") {
+      if (!ac.cols.length) return null;
+      return h_flex()
+        .flex_none()
+        .px(10)
+        .py(5)
+        .gap(5)
+        .items_center()
+        .bg(t.surface)
+        .border_b(1)
+        .border_color(t.accent)
+        .overflow_x_scrollbar()
+        .child(div().flex_none().text_size(10.5).text_color(t.dim).child("Columns:"))
+        .children(
+          ac.cols.map(col =>
+            h_flex()
+              .id(`fv-ac-col-${col.colIdx}`)
+              .flex_none()
+              .px(7)
+              .py(2)
+              .gap(4)
+              .items_center()
+              .rounded(5)
+              .bg(t.raised)
+              .border_1()
+              .border_color(t.border)
+              .cursor_pointer()
+              .hover(s => s.bg(t.selected).border_color(t.accent))
+              .on_click((_e, cx) => this.applyColumnSuggestion(ac, col, cx))
+              .child(div().text_size(10).font_semibold().text_color(t.accent).child(col.letter))
+              .child(div().text_size(11).text_color(t.foreground).child(col.header)),
+          ),
+        );
+    }
+
+    if (!ac.values.length) return null;
+    return h_flex()
+      .flex_none()
+      .px(10)
+      .py(5)
+      .gap(5)
+      .items_center()
+      .bg(t.surface)
+      .border_b(1)
+      .border_color(t.accent)
+      .overflow_x_scrollbar()
+      .child(div().flex_none().text_size(10.5).text_color(t.dim).child(`${ac.colName}:`))
+      .children(
+        ac.values.map((item, idx) => {
+          const isPicked = ac.selectedLower.has(item.value.toLowerCase());
+          return h_flex()
+            .id(`fv-ac-val-${ac.colIdx}-${idx}`)
+            .flex_none()
+            .px(7)
+            .py(2)
+            .gap(4)
+            .items_center()
+            .rounded(5)
+            .bg(isPicked ? t.selected : t.raised)
+            .border_1()
+            .border_color(isPicked ? t.accent : t.border)
+            .cursor_pointer()
+            .hover(s => s.bg(t.selected).border_color(t.accent))
+            .on_click((_e, cx) => this.toggleValueSuggestion(ac, item.value, cx))
+            .child(div().text_size(10.5).font_bold().text_color(isPicked ? t.accent : t.dim).child(isPicked ? "✓" : "+"))
+            .child(div().text_size(11).text_color(t.foreground).child(item.value || "(empty)"))
+            .child(div().text_size(10).text_color(t.dim).child(String(item.count)));
+        }),
+      );
+  }
+
   rebuildCsvViewRows() {
     const tbl = this.csvTable;
     if (!tbl) {
       this.csvViewRows = [];
       return;
     }
-    const rawFilter = (this.csvFilter || "").trim().toLowerCase();
-    let colFilterIdx = -1;
-    let needle = rawFilter;
-    const colon = rawFilter.indexOf(":");
-    if (colon > 0) {
-      const prefix = rawFilter.slice(0, colon).trim();
-      const rhs = rawFilter.slice(colon + 1).trim();
-      for (let c = 0; c < tbl.colCount; c++) {
-        if (columnLetter(c).toLowerCase() === prefix || (tbl.headers[c] || "").toLowerCase() === prefix) {
-          colFilterIdx = c;
-          needle = rhs;
-          break;
-        }
-      }
-    }
+    const { colRules, textTerms } = this.parseCsvSearchTokens();
 
     const items = [];
     for (let i = 0; i < tbl.dataRows.length; i++) {
@@ -681,19 +872,31 @@ export default class FileViewer extends View {
       }
       if (blockedByCol) continue;
 
-      if (needle) {
-        if (colFilterIdx >= 0) {
-          if (!String(row[colFilterIdx] ?? "").toLowerCase().includes(needle)) continue;
-        } else {
+      for (const rule of colRules) {
+        const cellLower = String(row[rule.colIdx] ?? "").toLowerCase();
+        if (!rule.vals.some(v => cellLower.includes(v))) {
+          blockedByCol = true;
+          break;
+        }
+      }
+      if (blockedByCol) continue;
+
+      if (textTerms.length > 0) {
+        let allTermsMatch = true;
+        for (const term of textTerms) {
           let matched = false;
           for (let c = 0; c < tbl.colCount; c++) {
-            if (String(row[c] ?? "").toLowerCase().includes(needle)) {
+            if (String(row[c] ?? "").toLowerCase().includes(term)) {
               matched = true;
               break;
             }
           }
-          if (!matched) continue;
+          if (!matched) {
+            allTermsMatch = false;
+            break;
+          }
         }
+        if (!allTermsMatch) continue;
       }
       items.push({ origIdx: i, row });
     }
@@ -752,6 +955,7 @@ export default class FileViewer extends View {
     while (targetRow.length <= col) targetRow.push("");
     targetRow[col] = nextVal;
     this.csvEditedCells.add(`${row}:${col}`);
+    this.csvUniqueCache?.delete(col);
     this.csvDirty = true;
     this.csvSaveError = null;
     this.rawText = serializeCsvTable(this.csvTable);
@@ -768,6 +972,7 @@ export default class FileViewer extends View {
     this.rawText = content;
     this.csvTable = parseCsvTable(content, this.file.toLowerCase().endsWith(".tsv"));
     this.csvEditedCells = new Set();
+    this.csvUniqueCache?.clear();
     this.csvDirty = false;
     this.csvSaveError = null;
     if (this.csvSelected) {
@@ -814,14 +1019,28 @@ export default class FileViewer extends View {
 
   uniqueValuesForCol(colIdx) {
     if (!this.csvTable) return [];
+    const cached = this.csvUniqueCache.get(colIdx);
+    if (cached) return cached;
+    const rows = this.csvTable.dataRows;
+    const scanLimit = Math.min(rows.length, MAX_UNIQUE_SCAN_ROWS);
     const counts = new Map();
-    for (const row of this.csvTable.dataRows) {
-      const v = String(row[colIdx] ?? "");
-      counts.set(v, (counts.get(v) || 0) + 1);
+    for (let i = 0; i < scanLimit; i++) {
+      const v = String(rows[i][colIdx] ?? "");
+      const prev = counts.get(v);
+      if (prev !== undefined) {
+        counts.set(v, prev + 1);
+      } else if (counts.size < MAX_UNIQUE_SUGGESTIONS) {
+        counts.set(v, 1);
+      }
     }
-    return [...counts.entries()]
-      .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true, sensitivity: "base" }))
+    const result = [...counts.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], undefined, { numeric: true, sensitivity: "base" }))
       .map(([value, count]) => ({ value, count }));
+    if (this.csvUniqueCache.size >= 8) {
+      this.csvUniqueCache.delete(this.csvUniqueCache.keys().next().value);
+    }
+    this.csvUniqueCache.set(colIdx, result);
+    return result;
   }
 
   openColFilterMenu(colIdx, cx) {
@@ -1097,6 +1316,7 @@ export default class FileViewer extends View {
         );
 
     const filterDropdown = this.renderCsvFilterDropdown(t);
+    const autocompleteBar = this.renderCsvAutocompleteBar(t);
 
     const totalPages = Math.max(1, Math.ceil(viewRows.length / CSV_PAGE_SIZE));
     const safePage = Math.max(0, Math.min(totalPages - 1, this.csvPage || 0));
@@ -1308,6 +1528,7 @@ export default class FileViewer extends View {
             el.child(div().text_size(11).text_color(t.ansi1).child(this.csvSaveError)),
           ),
       )
+      .when(Boolean(autocompleteBar), el => el.child(autocompleteBar))
       .when(Boolean(filterDropdown), el => el.child(filterDropdown))
       .child(
         div()
