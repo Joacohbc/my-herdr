@@ -203,6 +203,7 @@ export default class PaneCustom extends View {
     const onZoomReset = () => isViewer ? sendViewerCmd(pane, "zoom_reset") : run("app.zoom_reset");
     const onZoomIn = () => isViewer ? sendViewerCmd(pane, "zoom_in") : run("app.zoom_in");
 
+    const fontFamily = settings().font_family ?? settings().font;
     return h_flex()
       .id(`pane-head-${pane}`)
       .size_full()
@@ -210,6 +211,7 @@ export default class PaneCustom extends View {
       .gap(5)
       .items_center()
       .bg(t.background)
+      .when(Boolean(fontFamily), el => el.font_family(fontFamily))
       .when(bottom, el => el.border_t(1))
       .when(!bottom, el => el.border_b(1))
       .border_color(t.border)

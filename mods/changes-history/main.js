@@ -1173,7 +1173,7 @@ export default class ChangesHistory extends View {
   }
 
   render(cx) {
-    const t = theme(), size = settings().font_size;
+    const t = theme(), s = settings(), size = s.font_size, fontFamily = s.font_family ?? s.font;
     if (this.standaloneCommit && this.selectedCommit) {
       if (!checking()) this.checkStandaloneHibernation(cx);
       return v_flex()
@@ -1183,11 +1183,12 @@ export default class ChangesHistory extends View {
         .bg(t.background)
         .text_color(t.foreground)
         .text_size(13)
+        .when(Boolean(fontFamily), el => el.font_family(fontFamily))
         .child(this.renderCommitDetail(t, size));
     }
     if (this.standaloneFileDiff && this.standaloneFile) {
       if (!checking()) this.checkStandaloneHibernation(cx);
-      return this.renderStandaloneFileDiff(t, size);
+      return this.renderStandaloneFileDiff(t, size).when(Boolean(fontFamily), el => el.font_family(fontFamily));
     }
     if (!checking()) {
       if (isChangesPanelVisible() && key() !== this.context?.key) this.refresh(cx);
@@ -1207,6 +1208,7 @@ export default class ChangesHistory extends View {
       .border_color(t.border)
       .text_color(t.foreground)
       .text_size(13)
+      .when(Boolean(fontFamily), el => el.font_family(fontFamily))
       .track_focus(this.handle)
       .on_key_down((e, cx) => {
         if (e.key === "escape" && this.typing) {

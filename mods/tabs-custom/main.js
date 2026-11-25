@@ -171,7 +171,9 @@ export default class Tabs extends View {
           ),
         );
     };
+    const fontFamily = settings().font_family ?? settings().font;
     return h_flex().size_full().min_w(0).px(10).pl(lightsPadding).gap(3).items_center().bg(t.chrome).border_b(1).border_color(t.border)
+      .when(Boolean(fontFamily), el => el.font_family(fontFamily))
       .on_mouse_up("left", () => { this.pressed = null; })
       .on_scroll_wheel(e => this.wheel(e))
       .child(h_flex().id("tab-scroll").flex_1().min_w(0).h_full().items_center().gap(3).overflow_x_scrollbar().track_scroll(this.scroll)

@@ -460,6 +460,7 @@ export default class SystemMonitor extends View {
 
   render(cx) {
     const t = theme();
+    const fontFamily = settings().font_family ?? settings().font;
     const compact = this.width < 140;
 
     return v_flex()
@@ -471,6 +472,7 @@ export default class SystemMonitor extends View {
       .border_color(t.border)
       .text_color(t.foreground)
       .text_size(12)
+      .when(Boolean(fontFamily), el => el.font_family(fontFamily))
       .on_size_change((size, cx) => {
         const w = size.width / settings().zoom;
         if (Math.abs(w - this.width) > 2) {

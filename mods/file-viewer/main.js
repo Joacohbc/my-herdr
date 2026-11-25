@@ -14,6 +14,7 @@ import {
 } from "./preview.js";
 
 const MAX_FILE_CHARS = 250_000;
+const CSV_PAGE_SIZE = 200;
 const HIBERNATE_IDLE_MS = 45_000;
 const IDLE_CHECK_MS = 15_000;
 
@@ -110,10 +111,19 @@ export default class FileViewer extends View {
     this.csvSaving = false;
     this.csvSaveError = null;
     this.csvViewRows = [];
-    this.csvFilterInput = InputState.new({ placeholder: "Filter rows (or Col:value)…" });
+    this.csvPage = 0;
+    this.csvColFilters = new Map();
+    this.csvFilterMenuCol = -1;
+    this.csvMenuQuery = "";
+    this.csvFilterInput = InputState.new({ placeholder: "Search all columns (or Col:value)…" });
     this.csvFilterInput.on("change", (_e, cx) => {
       this.csvFilter = this.csvFilterInput.value();
       this.rebuildCsvViewRows();
+      cx.notify();
+    });
+    this.csvMenuInput = InputState.new({ placeholder: "Search values…" });
+    this.csvMenuInput.on("change", (_e, cx) => {
+      this.csvMenuQuery = this.csvMenuInput.value();
       cx.notify();
     });
     this.csvCellInput = InputState.new({ placeholder: "Click a cell to edit (Enter to apply)" });
@@ -141,6 +151,7 @@ export default class FileViewer extends View {
   close() {
     this.releaseBuffers();
     this.csvFilterInput?.release();
+    this.csvMenuInput?.release();
     this.csvCellInput?.release();
     if (this.paneId) {
       const all = { ...(shared("file-viewer.meta") ?? {}) };
@@ -158,6 +169,10 @@ export default class FileViewer extends View {
     this.csvTable = null;
     this.csvOriginalText = null;
     this.csvViewRows = [];
+    this.csvPage = 0;
+    this.csvColFilters = new Map();
+    this.csvFilterMenuCol = -1;
+    this.csvMenuQuery = "";
     this.csvSelected = null;
     this.csvEditedCells = new Set();
     this.csvDirty = false;
@@ -494,7 +509,11 @@ export default class FileViewer extends View {
           this.csvTable = parseCsvTable(content, this.file.toLowerCase().endsWith(".tsv"));
           this.csvFilter = "";
           this.csvFilterInput?.set_value("");
+          this.csvMenuQuery = "";
+          this.csvMenuInput?.set_value("");
           this.csvCellInput?.set_value("");
+          this.csvColFilters = new Map();
+          this.csvFilterMenuCol = -1;
           this.csvSortCol = -1;
           this.csvSortDir = 0;
           this.csvSelected = null;
@@ -652,6 +671,16 @@ export default class FileViewer extends View {
     const items = [];
     for (let i = 0; i < tbl.dataRows.length; i++) {
       const row = tbl.dataRows[i];
+      let blockedByCol = false;
+      for (const [colIdx, allowedSet] of this.csvColFilters.entries()) {
+        const cellVal = String(row[colIdx] ?? "");
+        if (!allowedSet.has(cellVal)) {
+          blockedByCol = true;
+          break;
+        }
+      }
+      if (blockedByCol) continue;
+
       if (needle) {
         if (colFilterIdx >= 0) {
           if (!String(row[colFilterIdx] ?? "").toLowerCase().includes(needle)) continue;
@@ -685,6 +714,8 @@ export default class FileViewer extends View {
     }
 
     this.csvViewRows = items;
+    const maxPage = Math.max(0, Math.ceil(items.length / CSV_PAGE_SIZE) - 1);
+    if (this.csvPage > maxPage) this.csvPage = maxPage;
   }
 
   toggleCsvSort(colIdx, cx) {
@@ -781,37 +812,240 @@ export default class FileViewer extends View {
     });
   }
 
+  uniqueValuesForCol(colIdx) {
+    if (!this.csvTable) return [];
+    const counts = new Map();
+    for (const row of this.csvTable.dataRows) {
+      const v = String(row[colIdx] ?? "");
+      counts.set(v, (counts.get(v) || 0) + 1);
+    }
+    return [...counts.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true, sensitivity: "base" }))
+      .map(([value, count]) => ({ value, count }));
+  }
+
+  openColFilterMenu(colIdx, cx) {
+    if (this.csvFilterMenuCol === colIdx) {
+      this.csvFilterMenuCol = -1;
+      cx.notify();
+      return;
+    }
+    this.csvFilterMenuCol = colIdx;
+    this.csvMenuQuery = "";
+    this.csvMenuInput.set_value("");
+    cx.notify();
+  }
+
+  toggleColFilterValue(colIdx, value, allValues, cx) {
+    let set = this.csvColFilters.get(colIdx);
+    if (!set) {
+      set = new Set(allValues.map(v => v.value));
+    } else {
+      set = new Set(set);
+    }
+    if (set.has(value)) set.delete(value);
+    else set.add(value);
+
+    if (set.size >= allValues.length) this.csvColFilters.delete(colIdx);
+    else this.csvColFilters.set(colIdx, set);
+
+    this.rebuildCsvViewRows();
+    cx.notify();
+  }
+
+  renderCsvFilterDropdown(t) {
+    const colIdx = this.csvFilterMenuCol;
+    if (colIdx < 0 || !this.csvTable) return null;
+    const allValues = this.uniqueValuesForCol(colIdx);
+    const q = (this.csvMenuQuery || "").trim().toLowerCase();
+    const visibleValues = q
+      ? allValues.filter(v => v.value.toLowerCase().includes(q))
+      : allValues;
+    const activeSet = this.csvColFilters.get(colIdx);
+    const selectedCount = activeSet ? activeSet.size : allValues.length;
+    const colTitle = `${columnLetter(colIdx)} ${this.csvTable.headers[colIdx] || ""}`.trim();
+
+    return v_flex()
+      .flex_none()
+      .max_h(220)
+      .px(10)
+      .py(8)
+      .gap(6)
+      .bg(t.surface)
+      .border_b(1)
+      .border_color(t.accent)
+      .child(
+        h_flex()
+          .gap(6)
+          .items_center()
+          .child(div().text_size(11.5).font_semibold().text_color(t.foreground).child(`Filter: ${colTitle}`))
+          .child(div().text_size(11).text_color(t.dim).child(`(${selectedCount}/${allValues.length})`))
+          .child(div().flex_1())
+          .child(
+            div()
+              .id("fv-fmenu-all")
+              .px(6)
+              .py(1)
+              .rounded(4)
+              .bg(t.raised)
+              .text_size(10.5)
+              .text_color(t.foreground)
+              .cursor_pointer()
+              .hover(s => s.bg(t.hover))
+              .on_click((_e, cx) => {
+                if (q) {
+                  const next = new Set(activeSet ? [...activeSet] : []);
+                  for (const item of visibleValues) next.add(item.value);
+                  if (next.size >= allValues.length) this.csvColFilters.delete(colIdx);
+                  else this.csvColFilters.set(colIdx, next);
+                } else {
+                  this.csvColFilters.delete(colIdx);
+                }
+                this.rebuildCsvViewRows();
+                cx.notify();
+              })
+              .child(q ? "Select matches" : "Select all"),
+          )
+          .child(
+            div()
+              .id("fv-fmenu-none")
+              .px(6)
+              .py(1)
+              .rounded(4)
+              .bg(t.raised)
+              .text_size(10.5)
+              .text_color(t.muted)
+              .cursor_pointer()
+              .hover(s => s.bg(t.hover).text_color(t.foreground))
+              .on_click((_e, cx) => {
+                this.csvColFilters.set(colIdx, new Set());
+                this.rebuildCsvViewRows();
+                cx.notify();
+              })
+              .child("Clear"),
+          )
+          .child(
+            div()
+              .id("fv-fmenu-close")
+              .px(6)
+              .py(1)
+              .rounded(4)
+              .bg(t.solid)
+              .text_size(10.5)
+              .font_semibold()
+              .text_color(t.solid_foreground)
+              .cursor_pointer()
+              .on_click((_e, cx) => {
+                this.csvFilterMenuCol = -1;
+                cx.notify();
+              })
+              .child("Done"),
+          ),
+      )
+      .child(
+        h_flex()
+          .h(24)
+          .px(7)
+          .items_center()
+          .rounded(5)
+          .bg(t.background)
+          .border_1()
+          .border_color(t.border)
+          .child(Input.new(this.csvMenuInput).flex_1().h_full().text_size(11.5).text_color(t.foreground)),
+      )
+      .child(
+        v_flex()
+          .id("fv-fmenu-list")
+          .flex_1()
+          .min_h(48)
+          .max_h(132)
+          .overflow_y_scrollbar()
+          .gap(1)
+          .children(
+            visibleValues.slice(0, 120).map((item, idx) => {
+              const checked = !activeSet || activeSet.has(item.value);
+              return h_flex()
+                .id(`fv-fval-${colIdx}-${idx}`)
+                .h(22)
+                .flex_none()
+                .px(6)
+                .gap(7)
+                .items_center()
+                .rounded(4)
+                .cursor_pointer()
+                .hover(s => s.bg(t.hover))
+                .on_click((_e, cx) => this.toggleColFilterValue(colIdx, item.value, allValues, cx))
+                .child(div().w(14).text_size(11).font_bold().text_color(checked ? t.accent : t.dim).child(checked ? "☑" : "☐"))
+                .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(checked ? t.foreground : t.dim).child(item.value || "(empty)"))
+                .child(div().text_size(10.5).text_color(t.dim).child(String(item.count)));
+            }),
+          )
+          .when(visibleValues.length === 0, el =>
+            el.child(div().p(6).text_size(11).text_color(t.dim).child("No matching values")),
+          ),
+      );
+  }
+
   renderCsvBody(t, fontSize) {
     const tbl = this.csvTable;
+    if (tbl && this.csvViewRows.length === 0 && !this.csvFilter && this.csvColFilters.size === 0 && tbl.dataRows.length > 0) {
+      this.rebuildCsvViewRows();
+    }
     const viewRows = this.csvViewRows;
     const rowH = Math.ceil(fontSize * 1.9);
     const gutterW = 46;
     const totalW = gutterW + tbl.colWidths.reduce((s, w) => s + w, 0) + 16;
     const cellRef = this.csvSelected ? `${columnLetter(this.csvSelected.col)}${this.csvSelected.row + 1}` : "—";
+    const hasAnyFilter = Boolean(this.csvFilter) || this.csvColFilters.size > 0;
 
     const headerCells = [
       div().w(gutterW).h_full().flex_none().px(6).flex().items_center().justify_end().border_r(1).border_color(t.border).text_size(10.5).text_color(t.dim).child("#"),
       ...tbl.colWidths.map((w, idx) => {
         const isSorted = this.csvSortCol === idx && this.csvSortDir !== 0;
         const sortGlyph = !isSorted ? "" : this.csvSortDir === 1 ? "▲" : "▼";
+        const isFiltered = this.csvColFilters.has(idx);
+        const isMenuOpen = this.csvFilterMenuCol === idx;
         return h_flex()
-          .id(`fv-csv-hdr-${idx}`)
           .w(w)
           .h_full()
           .flex_none()
-          .px(8)
-          .gap(5)
+          .pl(7)
+          .pr(4)
+          .gap(4)
           .items_center()
           .border_r(1)
           .border_color(t.border)
-          .cursor_pointer()
-          .when(isSorted, el => el.bg(t.selected))
-          .hover(s => s.bg(isSorted ? t.selected : t.hover))
-          .tooltip(`Click to sort by ${columnLetter(idx)} (${tbl.headers[idx] || ""})`)
-          .on_click((_e, cx) => this.toggleCsvSort(idx, cx))
-          .child(div().text_size(9.5).font_semibold().text_color(t.accent).child(columnLetter(idx)))
-          .child(div().flex_1().min_w(0).truncate().text_size(Math.max(10, fontSize - 1.5)).font_semibold().text_color(t.foreground).child(tbl.headers[idx] ?? ""))
-          .when(Boolean(sortGlyph), el => el.child(div().text_size(9.5).font_bold().text_color(t.accent).child(sortGlyph)));
+          .when(isSorted || isMenuOpen, el => el.bg(t.selected))
+          .child(
+            h_flex()
+              .id(`fv-csv-hdr-${idx}`)
+              .flex_1()
+              .min_w(0)
+              .h_full()
+              .gap(4)
+              .items_center()
+              .cursor_pointer()
+              .tooltip(`Click to sort by ${columnLetter(idx)} (${tbl.headers[idx] || ""})`)
+              .on_click((_e, cx) => this.toggleCsvSort(idx, cx))
+              .child(div().text_size(9.5).font_semibold().text_color(t.accent).child(columnLetter(idx)))
+              .child(div().flex_1().min_w(0).truncate().text_size(Math.max(10, fontSize - 1.5)).font_semibold().text_color(t.foreground).child(tbl.headers[idx] ?? ""))
+              .when(Boolean(sortGlyph), el => el.child(div().text_size(9.5).font_bold().text_color(t.accent).child(sortGlyph))),
+          )
+          .child(
+            div()
+              .id(`fv-csv-flt-${idx}`)
+              .px(4)
+              .py(1)
+              .rounded(4)
+              .cursor_pointer()
+              .text_size(10)
+              .when(isFiltered || isMenuOpen, el => el.bg(t.accent + "30"))
+              .text_color(isFiltered || isMenuOpen ? t.accent : t.dim)
+              .hover(s => s.bg(t.hover).text_color(t.foreground))
+              .tooltip(`Filter values in ${tbl.headers[idx] || columnLetter(idx)}`)
+              .on_click((_e, cx) => this.openColFilterMenu(idx, cx))
+              .child("▾"),
+          );
       }),
     ];
 
@@ -862,6 +1096,13 @@ export default class FileViewer extends View {
           }),
         );
 
+    const filterDropdown = this.renderCsvFilterDropdown(t);
+
+    const totalPages = Math.max(1, Math.ceil(viewRows.length / CSV_PAGE_SIZE));
+    const safePage = Math.max(0, Math.min(totalPages - 1, this.csvPage || 0));
+    const pageStart = safePage * CSV_PAGE_SIZE;
+    const pageRows = viewRows.slice(pageStart, pageStart + CSV_PAGE_SIZE);
+
     return v_flex()
       .flex_1()
       .min_h(0)
@@ -877,7 +1118,7 @@ export default class FileViewer extends View {
           .border_color(t.border)
           .child(
             h_flex()
-              .w(210)
+              .w(220)
               .h(24)
               .px(7)
               .gap(4)
@@ -912,10 +1153,60 @@ export default class FileViewer extends View {
               .text_size(11)
               .text_color(t.dim)
               .child(
-                this.csvFilter
+                hasAnyFilter
                   ? `${viewRows.length} / ${tbl.dataRows.length} rows`
                   : `${tbl.dataRows.length}${tbl.truncated ? "+" : ""} rows × ${tbl.colCount} cols`,
               ),
+          )
+          .when(totalPages > 1, el =>
+            el
+              .child(
+                div()
+                  .id("fv-csv-pg-prev")
+                  .px(5)
+                  .py(1)
+                  .rounded(4)
+                  .bg(t.raised)
+                  .text_size(10.5)
+                  .text_color(safePage > 0 ? t.foreground : t.dim)
+                  .when(safePage > 0, b => b.cursor_pointer().hover(s => s.bg(t.hover)).on_click((_e, cx) => { this.csvPage = safePage - 1; cx.notify(); }))
+                  .child("←"),
+              )
+              .child(div().text_size(10.5).text_color(t.dim).child(`${safePage + 1}/${totalPages}`))
+              .child(
+                div()
+                  .id("fv-csv-pg-next")
+                  .px(5)
+                  .py(1)
+                  .rounded(4)
+                  .bg(t.raised)
+                  .text_size(10.5)
+                  .text_color(safePage + 1 < totalPages ? t.foreground : t.dim)
+                  .when(safePage + 1 < totalPages, b => b.cursor_pointer().hover(s => s.bg(t.hover)).on_click((_e, cx) => { this.csvPage = safePage + 1; cx.notify(); }))
+                  .child("→"),
+              ),
+          )
+          .when(this.csvColFilters.size > 0, el =>
+            el.child(
+              div()
+                .id("fv-csv-clear-col-filters")
+                .px(6)
+                .py(1)
+                .rounded(4)
+                .bg(t.accent + "26")
+                .text_size(10.5)
+                .font_semibold()
+                .text_color(t.accent)
+                .cursor_pointer()
+                .hover(s => s.bg(t.hover))
+                .on_click((_e, cx) => {
+                  this.csvColFilters.clear();
+                  this.csvFilterMenuCol = -1;
+                  this.rebuildCsvViewRows();
+                  cx.notify();
+                })
+                .child(`${this.csvColFilters.size} filter${this.csvColFilters.size === 1 ? "" : "s"} ×`),
+            ),
           )
           .child(div().flex_1())
           .when(this.csvDirty, el =>
@@ -1017,6 +1308,7 @@ export default class FileViewer extends View {
             el.child(div().text_size(11).text_color(t.ansi1).child(this.csvSaveError)),
           ),
       )
+      .when(Boolean(filterDropdown), el => el.child(filterDropdown))
       .child(
         div()
           .flex_1()
@@ -1025,7 +1317,8 @@ export default class FileViewer extends View {
           .child(
             div()
               .id("fv-csv-x")
-              .size_full()
+              .absolute()
+              .inset_0()
               .overflow_x_scrollbar()
               .child(
                 v_flex()
@@ -1041,22 +1334,18 @@ export default class FileViewer extends View {
                       .children(headerCells),
                   )
                   .child(
-                    div()
+                    v_flex()
+                      .id("fv-csv-rows")
                       .flex_1()
                       .min_h(0)
-                      .child(
-                        v_virtual_list(
-                          "fv-csv-rows",
-                          viewRows.length,
-                          rowH,
-                          (i) => String(viewRows[i]?.origIdx ?? i),
-                          (range) => viewRows.slice(range.start, range.end).map((item, offset) => renderDataRow(item, range.start + offset)),
-                        ).size_full(),
+                      .overflow_y_scrollbar()
+                      .children(pageRows.map((item, offset) => renderDataRow(item, pageStart + offset)))
+                      .when(pageRows.length === 0, el =>
+                        el.child(div().p(12).text_size(12).text_color(t.dim).child("No matching rows")),
                       ),
                   ),
               ),
-          )
-          .child(Scrollbar.vertical("fv-csv-rows").viewport_from_layout().absolute().inset_0()),
+          ),
       );
   }
 
@@ -1069,6 +1358,7 @@ export default class FileViewer extends View {
     }
     const t = theme();
     const font = settings();
+    const fontFamily = font.font_family ?? font.font;
     const baseSize = font.font_size ?? 14;
     const fontSize = Math.max(9, Math.min(28, baseSize + this.fontDelta));
     const zoomScale = fontSize / baseSize;
@@ -1113,6 +1403,7 @@ export default class FileViewer extends View {
       .bg(t.background)
       .text_color(t.foreground)
       .text_size(13)
+      .when(Boolean(fontFamily), el => el.font_family(fontFamily))
       .on_scroll_wheel((e, cx) => {
         if (!e.modifiers?.control && !e.modifiers?.platform) return;
         const dy = e.delta?.y ?? 0;

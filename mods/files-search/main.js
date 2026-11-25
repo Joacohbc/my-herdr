@@ -1,6 +1,6 @@
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Input, InputState } from "gpui-base";
-import { spaces, panes, focused, exec, watchFolder, theme, window, layout, checking, run, shared, setShared } from "herdr";
+import { spaces, panes, focused, exec, watchFolder, theme, settings, window, layout, checking, run, shared, setShared } from "herdr";
 import { searchContent, searchFiles, MAX_MATCHES } from "./search.js";
 import { fileIcon, folderIcon, releaseIconCache } from "./material-icons.js";
 
@@ -917,6 +917,7 @@ export default class FilesSearch extends View {
       else this.refreshIfDue(cx);
     }
     const t = theme();
+    const fontFamily = settings().font_family ?? settings().font;
     const isSearching = this.query.trim().length > 0;
     const headerRight = this.root?.split(/[\\/]/).pop() ?? "";
 
@@ -931,6 +932,7 @@ export default class FilesSearch extends View {
       .border_color(t.border)
       .text_color(t.foreground)
       .text_size(13)
+      .when(Boolean(fontFamily), el => el.font_family(fontFamily))
       .child(
         h_flex()
           .h(42)
