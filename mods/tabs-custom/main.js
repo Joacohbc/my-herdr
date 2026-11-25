@@ -138,7 +138,8 @@ export default class Tabs extends View {
 
     const panelButton = (id, label, icon, badgeCount = 0) => {
       const on = panel && !panel.hidden && body?.active === id;
-      return h_flex().id(`panel-${id}`).h(26).px(8).gap(5).flex_none().items_center().rounded(6)
+      return h_flex().id(`panel-${id}`).relative().h(26).px(8).gap(5).flex_none().items_center().rounded(6)
+        .when(badgeCount > 0, el => el.mr(4))
         .text_size(12).bg(on ? t.selected : t.chrome).text_color(on ? t.foreground : t.muted)
         .hover(s => s.bg(t.hover)).on_mouse_down("left", stop)
         .on_click(() => {
@@ -149,15 +150,24 @@ export default class Tabs extends View {
         .child(label)
         .when(badgeCount > 0, el =>
           el.child(
-            h_flex()
-              .px(5)
+            div()
+              .absolute()
+              .top(-5)
+              .right(-5)
+              .min_w(16)
               .h(16)
-              .gap(4)
-              .items_center()
+              .px(4)
               .rounded(999)
-              .bg(t.accent + "28")
-              .child(div().size(5).rounded(999).bg(t.accent))
-              .child(div().text_size(10).font_semibold().text_color(t.accent).child(badgeCount > 99 ? "99+" : String(badgeCount))),
+              .bg(t.accent)
+              .border_1()
+              .border_color(t.chrome)
+              .flex()
+              .items_center()
+              .justify_center()
+              .text_size(9.5)
+              .font_bold()
+              .text_color(t.accent_foreground)
+              .child(badgeCount > 99 ? "99+" : String(badgeCount)),
           ),
         );
     };
