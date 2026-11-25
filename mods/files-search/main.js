@@ -1,6 +1,6 @@
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Input, InputState } from "gpui-base";
-import { spaces, panes, focused, exec, watchFolder, theme, settings, window, layout, checking, run, shared, setShared } from "herdr";
+import { spaces, panes, focused, exec, watchFolder, theme, settings, window, layout, checking, run, shared, setShared, props, openOverlay, closeOverlay, notify } from "herdr";
 import { searchContent, searchFiles, MAX_MATCHES } from "./search.js";
 import { fileIcon, folderIcon, releaseIconCache } from "./material-icons.js";
 
@@ -122,7 +122,12 @@ async function directory(path, on) {
 }
 
 export default class FilesSearch extends View {
-  init(_props, cx) {
+  init(initialProps, cx) {
+    const p = (initialProps && Object.keys(initialProps).length ? initialProps : null) ?? props();
+    this.menuData = p?.menu ?? null;
+    this.overlayId = p?.overlay ?? null;
+    if (this.menuData) return;
+
     this.saved = new Map();
     this.entries = new Map();
     this.folders = new Set();
@@ -497,6 +502,78 @@ export default class FilesSearch extends View {
     cx.notify();
   }
 
+  openContextMenu(relPath, isDir) {
+    if (!relPath || !this.root) return;
+    const absPath = `${this.root.replace(/\/+$/, "")}/${relPath}`;
+    const name = relPath.split(/[\\/]/).pop() || relPath;
+    openOverlay({
+      mod: "files-search",
+      kind: "popup",
+      width: 215,
+      height: isDir ? 104 : 138,
+      props: {
+        menu: {
+          relPath,
+          absPath,
+          name,
+          isDir: Boolean(isDir),
+          root: this.root,
+          on: this.on ?? null,
+        },
+      },
+    });
+  }
+
+  renderContextMenu(t, fontFamily) {
+    const m = this.menuData;
+    const overlay = this.overlayId;
+    const copyAndClose = (label, value, cx) => {
+      cx.write_to_clipboard(value);
+      if (overlay) closeOverlay(overlay);
+      notify({ title: label, body: value, timeout: 1800 });
+    };
+    const menuItem = (id, label, onClick) =>
+      h_flex()
+        .id(id)
+        .h(28)
+        .px(10)
+        .items_center()
+        .rounded(6)
+        .cursor_pointer()
+        .text_size(12)
+        .text_color(t.foreground)
+        .hover(s => s.bg(t.hover))
+        .on_click(onClick)
+        .child(label);
+
+    return v_flex()
+      .id("files-ctx-menu")
+      .size_full()
+      .p(6)
+      .gap(2)
+      .bg(t.popover ?? t.surface)
+      .text_color(t.foreground)
+      .when(Boolean(fontFamily), el => el.font_family(fontFamily))
+      .child(menuItem("ctx-copy-rel", "Copy Relative Path", (_e, cx) => copyAndClose("Relative path copied", m.relPath, cx)))
+      .child(menuItem("ctx-copy-abs", "Copy Absolute Path", (_e, cx) => copyAndClose("Absolute path copied", m.absPath, cx)))
+      .child(menuItem("ctx-copy-name", "Copy Name", (_e, cx) => copyAndClose("Name copied", m.name, cx)))
+      .when(!m.isDir, el =>
+        el
+          .child(div().h(1).my(2).bg(t.border))
+          .child(
+            menuItem("ctx-open-tab", "Open in New Tab", () => {
+              if (overlay) closeOverlay(overlay);
+              const res = run("tab.new", {
+                name: m.name,
+                mod: "file-viewer",
+                props: { file: m.relPath, root: m.root, on: m.on, tab: null, solo: true },
+              });
+              if (res?.pane) run("pane.rename", { pane: res.pane, name: m.name });
+            }),
+          ),
+      );
+  }
+
   show(path, cx, locationTarget = null, event = null) {
     if (!path || !this.root) return;
     const f = focused();
@@ -764,6 +841,10 @@ export default class FilesSearch extends View {
           .rounded(6)
           .cursor_pointer()
           .hover(s => s.bg(t.hover))
+          .on_mouse_down("right", (_e, cx) => {
+            cx.stop_propagation();
+            this.openContextMenu(group.path, false);
+          })
           .on_click((_e, cx) => {
             if (collapsed) this.collapsedResults.delete(group.path);
             else this.collapsedResults.add(group.path);
@@ -870,6 +951,10 @@ export default class FilesSearch extends View {
         .rounded(7)
         .cursor_pointer()
         .hover(s => s.bg(t.hover))
+        .on_mouse_down("right", (_e, cx) => {
+          cx.stop_propagation();
+          this.openContextMenu(f.path, false);
+        })
         .on_click((e, cx) => this.show(f.path, cx, null, e))
         .child(image(fileIcon(f.name)).w(16).h(16).flex_none())
         .child(div().font_medium().text_color(t.foreground).child(f.name))
@@ -900,6 +985,10 @@ export default class FilesSearch extends View {
           .rounded(7)
           .cursor_pointer()
           .hover(s => s.bg(t.hover))
+          .on_mouse_down("right", (_e, cx) => {
+            cx.stop_propagation();
+            this.openContextMenu(path, entry.dir);
+          })
           .on_click((e, cx) => entry.dir ? this.toggle(path, cx) : this.show(path, cx, null, e))
           .child(entry.dir ? svg(`mods/files-search/chevron-${open ? "down" : "right"}.svg`).size(12).flex_none().text_color(t.dim) : div().w(12).flex_none())
           .child(image(entry.dir ? folderIcon(entry.name, open) : fileIcon(entry.name)).w(16).h(16).flex_none())
@@ -912,12 +1001,13 @@ export default class FilesSearch extends View {
   }
 
   render(cx) {
+    const t = theme();
+    const fontFamily = settings().font_family ?? settings().font;
+    if (this.menuData) return this.renderContextMenu(t, fontFamily);
     if (!checking()) {
       if (key() !== this.context?.key) this.refresh(cx);
       else this.refreshIfDue(cx);
     }
-    const t = theme();
-    const fontFamily = settings().font_family ?? settings().font;
     const isSearching = this.query.trim().length > 0;
     const headerRight = this.root?.split(/[\\/]/).pop() ?? "";
 
