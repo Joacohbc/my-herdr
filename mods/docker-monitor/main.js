@@ -1,7 +1,7 @@
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { theme, settings, window, shared, layout, checking, run } from "herdr";
-import { STACK, BRAND_PX, findNode, snapshotHeights, pushResize } from "./stack-resize.js";
+import { STACK, BRAND_PX, findNode, snapshotHeights, pushResize, fitStackToViewport } from "./stack-resize.js";
 import { MAX_CPU_HISTORY, formatBytes, runContainerAction, sampleContainers } from "./docker.js";
 
 const OWN_ID = "docker";
@@ -197,7 +197,7 @@ export default class DockerMonitor extends View {
       }
       run("layout.resize", { id: OWN_ID, px: COLLAPSED_PX });
     } else {
-      run("layout.resize", { id: OWN_ID, px: Number(localStorage.getItem(EXPANDED_KEY)) || DEFAULT_EXPANDED });
+      fitStackToViewport(OWN_ID, Number(localStorage.getItem(EXPANDED_KEY)) || DEFAULT_EXPANDED);
       this.refresh(cx);
     }
     cx.notify();

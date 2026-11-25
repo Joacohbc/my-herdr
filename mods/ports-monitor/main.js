@@ -11,7 +11,7 @@ import {
   layout,
   checking,
 } from "herdr";
-import { STACK, BRAND_PX, snapshotHeights, pushResize } from "./stack-resize.js";
+import { STACK, BRAND_PX, snapshotHeights, pushResize, fitStackToViewport } from "./stack-resize.js";
 
 const OWN_ID = "ports-monitor";
 const COLLAPSED_PX = 64;
@@ -133,7 +133,7 @@ export default class PortsMonitor extends View {
       run("layout.resize", { id: OWN_ID, px: COLLAPSED_PX });
     } else {
       const px = Number(localStorage.getItem(EXPANDED_KEY)) || DEFAULT_EXPANDED;
-      run("layout.resize", { id: OWN_ID, px });
+      fitStackToViewport(OWN_ID, px);
       this.refresh(cx);
     }
     cx.notify();

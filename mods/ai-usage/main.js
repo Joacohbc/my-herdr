@@ -1,7 +1,7 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { theme, settings, window, shared, layout, checking, run } from "herdr";
-import { STACK, BRAND_PX, findNode, snapshotHeights, pushResize } from "./stack-resize.js";
+import { STACK, BRAND_PX, findNode, snapshotHeights, pushResize, fitStackToViewport } from "./stack-resize.js";
 import { loadConfig, resolveNode, runCollector } from "./node.js";
 
 const OWN_ID = "usage";
@@ -94,6 +94,7 @@ export default class AiUsage extends View {
       return;
     }
     this.hiddenSince = 0;
+    if (!this.drag) fitStackToViewport();
     const interval = this.collapsed ? COLLAPSED_POLL_MS : ACTIVE_POLL_MS;
     if (!this.lastPollAt || now - this.lastPollAt >= interval) {
       this.refresh(cx);
@@ -152,7 +153,7 @@ export default class AiUsage extends View {
       }
       run("layout.resize", { id: OWN_ID, px: COLLAPSED_PX });
     } else {
-      run("layout.resize", { id: OWN_ID, px: Number(localStorage.getItem(EXPANDED_KEY)) || DEFAULT_EXPANDED });
+      fitStackToViewport(OWN_ID, Number(localStorage.getItem(EXPANDED_KEY)) || DEFAULT_EXPANDED);
     }
     cx.notify();
   }

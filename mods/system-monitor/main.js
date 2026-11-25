@@ -1,7 +1,7 @@
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { exec, hc, theme, settings, window, panes, shared, setShared, checking, run, layout } from "herdr";
-import { STACK, BRAND_PX, snapshotHeights, pushResize } from "./stack-resize.js";
+import { STACK, BRAND_PX, snapshotHeights, pushResize, fitStackToViewport } from "./stack-resize.js";
 
 const OWN_ID = "system-monitor";
 const COLLAPSED_PX = 62;
@@ -600,7 +600,7 @@ export default class SystemMonitor extends View {
                       run("layout.resize", { id: OWN_ID, px: COLLAPSED_PX });
                     } else {
                       const px = Number(localStorage.getItem(EXPANDED_KEY)) || DEFAULT_EXPANDED;
-                      run("layout.resize", { id: OWN_ID, px });
+                      fitStackToViewport(OWN_ID, px);
                       this.sample(cx);
                     }
                     cx.notify();
