@@ -237,11 +237,16 @@ export default class PaneCustom extends View {
         .child(this.pill(t, `ph-zo-${pane}`, "−", false, onZoomOut))
         .child(this.pill(t, `ph-zr-${pane}`, `${zoomPct}%`, zoomPct !== 100, onZoomReset))
         .child(this.pill(t, `ph-zi-${pane}`, "+", false, onZoomIn)))
-      .when(this.hovered || p.zoomed, el => el
-        .child(this.button(t, `ph-z-${pane}`, p.zoomed ? "unzoom" : "zoom", "pane.zoom", { pane })))
-      .when(this.hovered, el => el
-        .child(this.button(t, `ph-r-${pane}`, "split-right", "pane.split", { direction: "right", pane }))
-        .child(this.button(t, `ph-d-${pane}`, "split-down", "pane.split", { direction: "down", pane }))
-        .child(this.button(t, `ph-x-${pane}`, "close", "pane.close", { pane })));
+      .child(
+        h_flex()
+          .flex_none()
+          .gap(2)
+          .items_center()
+          .opacity(this.hovered || p.zoomed ? 1 : 0.4)
+          .child(this.button(t, `ph-z-${pane}`, p.zoomed ? "unzoom" : "zoom", "pane.zoom", { pane }))
+          .child(this.button(t, `ph-r-${pane}`, "split-right", "pane.split", { direction: "right", pane }))
+          .child(this.button(t, `ph-d-${pane}`, "split-down", "pane.split", { direction: "down", pane }))
+          .child(this.button(t, `ph-x-${pane}`, "close", "pane.close", { pane })),
+      );
   }
 }
