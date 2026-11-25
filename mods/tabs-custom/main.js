@@ -171,6 +171,14 @@ export default class Tabs extends View {
           ),
         );
     };
+    const webButton = h_flex().id("panel-web").h(26).px(8).gap(5).flex_none().items_center().rounded(6)
+      .text_size(12).bg(t.chrome).text_color(t.muted)
+      .hover(s => s.bg(t.hover).text_color(t.foreground))
+      .on_mouse_down("left", stop)
+      .on_click(() => openOverlay({ mod: "web-launcher", kind: "dialog", width: 430, height: 420 }))
+      .child(svg("mods/tabs-custom/web.svg").size(14))
+      .child("Web");
+
     const fontFamily = settings().font_family ?? settings().font;
     return h_flex().size_full().min_w(0).px(10).pl(lightsPadding).gap(3).items_center().bg(t.chrome).border_b(1).border_color(t.border)
       .when(Boolean(fontFamily), el => el.font_family(fontFamily))
@@ -180,6 +188,7 @@ export default class Tabs extends View {
         .on_size_change((_size, cx) => { if (active >= 0) { this.scroll.scroll_to_item(active); cx.notify(); } })
         .children(shown.map(item)))
       .child(button("tab-new", "+", () => openOverlay({ mod: "new-menu", kind: "popup", width: 250, height: 512 })))
+      .child(webButton)
       .when(enabled.includes("files"), el => el.child(panelButton("files", "Files", "mods/files/file.svg")))
       .when(enabled.includes("changes"), el => el.child(panelButton("changes", "Changes", "mods/changes/changes.svg", changesCount)))
       .when(w?.buttons, el => el.child(button("minimize", w.platform === "windows" ? svg("mods/tabs-custom/win-min.svg").size(16) : "−", () => run("window.minimize")))

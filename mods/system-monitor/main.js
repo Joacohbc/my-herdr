@@ -1,6 +1,6 @@
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { exec, hc, theme, settings, window, panes, shared, setShared, checking } from "herdr";
+import { exec, hc, theme, settings, window, panes, shared, setShared, checking, run } from "herdr";
 
 const ACTIVE_POLL_MS = 3000;
 const UNFOCUSED_POLL_MS = 8000;
@@ -149,10 +149,17 @@ export default class SystemMonitor extends View {
     this.lastPollAt = 0;
     this.lastCleanAt = 0;
     this.lastCleanSummary = "";
+    this.collapsed = localStorage.getItem("sys.collapsed") === "1";
+    this.blockHeight = 200;
     this.error = null;
 
     if (checking()) return;
-    this.sample(cx);
+    if (this.collapsed) {
+      run("layout.resize", { id: "system-monitor", px: 62 });
+      this.sample(cx);
+    } else {
+      this.sample(cx);
+    }
     cx.spawn(async cx => {
       await cx.sleep(5000);
       this.runAutoCleanup(cx, "startup");
@@ -161,9 +168,11 @@ export default class SystemMonitor extends View {
       const w = window();
       if (w?.visible === false) return;
       const now = Date.now();
-      const interval = w?.active === false ? UNFOCUSED_POLL_MS : ACTIVE_POLL_MS;
-      if (now - this.lastPollAt >= interval - 100) {
-        this.sample(cx);
+      if (!this.collapsed) {
+        const interval = w?.active === false ? UNFOCUSED_POLL_MS : ACTIVE_POLL_MS;
+        if (now - this.lastPollAt >= interval - 100) {
+          this.sample(cx);
+        }
       }
       if (now - this.lastCleanAt >= AUTO_CLEAN_MS) {
         this.runAutoCleanup(cx, this.memPct >= HIGH_RAM_GC_PCT ? "high-ram" : "auto");
@@ -475,17 +484,49 @@ export default class SystemMonitor extends View {
       .when(Boolean(fontFamily), el => el.font_family(fontFamily))
       .on_size_change((size, cx) => {
         const w = size.width / settings().zoom;
-        if (Math.abs(w - this.width) > 2) {
+        const h = size.height / settings().zoom;
+        if (Math.abs(w - this.width) > 2 || Math.abs(h - this.blockHeight) >= 6) {
           this.width = w;
+          this.blockHeight = h;
           cx.notify();
         }
       })
       .when(compact, el => el.child(this.renderCompact(t)))
-      .when(!compact, el =>
-        el
+      .when(!compact, el => {
+        const isMini = this.collapsed || this.blockHeight < 92;
+        const miniMeter = (label, value, pct) =>
+          v_flex()
+            .flex_1()
+            .min_w(0)
+            .gap(3)
+            .child(
+              h_flex()
+                .justify_between()
+                .items_center()
+                .text_size(10.5)
+                .child(div().text_color(t.muted).child(label))
+                .child(div().text_color(t.foreground).font_medium().child(value)),
+            )
+            .child(
+              div()
+                .w_full()
+                .h(4)
+                .rounded(2)
+                .bg(t.surface)
+                .overflow_hidden()
+                .child(
+                  div()
+                    .h_full()
+                    .w(`${Math.max(2, Math.min(100, Math.round(pct)))}%`)
+                    .rounded(2)
+                    .bg(barColor(pct, t)),
+                ),
+            );
+
+        return el
           .child(
             h_flex()
-              .h(34)
+              .h(isMini ? 26 : 34)
               .flex_none()
               .px(12)
               .gap(5)
@@ -501,9 +542,16 @@ export default class SystemMonitor extends View {
                   .hover(s => s.text_color(t.foreground))
                   .on_click((_e, cx) => {
                     this.collapsed = !this.collapsed;
+                    try { localStorage.setItem("sys.collapsed", this.collapsed ? "1" : "0"); } catch {}
+                    if (this.collapsed) {
+                      run("layout.resize", { id: "system-monitor", px: 62 });
+                    } else {
+                      run("layout.resize", { id: "system-monitor", weight: 1 });
+                      this.sample(cx);
+                    }
                     cx.notify();
                   })
-                  .child(this.collapsed ? "System ▸" : "System"),
+                  .child(this.collapsed ? "System ▸" : "System ▾"),
               )
               .child(
                 div()
@@ -557,25 +605,46 @@ export default class SystemMonitor extends View {
                   .child("CPU"),
               ),
           )
-          .child(
-            v_flex()
-              .flex_none()
-              .px(12)
-              .pb(8)
-              .gap(7)
-              .child(this.meterRow("CPU", `${formatPct(this.cpuPct)}`, this.cpuPct, t))
-              .child(
-                this.meterRow(
-                  "RAM",
-                  this.memTotalKb
-                    ? `${formatMem(this.memUsedKb)} / ${formatMem(this.memTotalKb)} (${Math.round(this.memPct)}%)`
-                    : "…",
-                  this.memPct,
-                  t,
+          .when(isMini, m =>
+            m.child(
+              h_flex()
+                .flex_none()
+                .h(30)
+                .px(12)
+                .pb(4)
+                .gap(10)
+                .items_center()
+                .child(miniMeter("CPU", formatPct(this.cpuPct), this.cpuPct))
+                .child(
+                  miniMeter(
+                    "RAM",
+                    this.memTotalKb ? `${Math.round(this.memPct)}%` : "…",
+                    this.memPct,
+                  ),
                 ),
-              ),
+            ),
           )
-          .when(!this.collapsed, body =>
+          .when(!isMini, full =>
+            full.child(
+              v_flex()
+                .flex_none()
+                .px(12)
+                .pb(8)
+                .gap(7)
+                .child(this.meterRow("CPU", `${formatPct(this.cpuPct)}`, this.cpuPct, t))
+                .child(
+                  this.meterRow(
+                    "RAM",
+                    this.memTotalKb
+                      ? `${formatMem(this.memUsedKb)} / ${formatMem(this.memTotalKb)} (${Math.round(this.memPct)}%)`
+                      : "…",
+                    this.memPct,
+                    t,
+                  ),
+                ),
+            ),
+          )
+          .when(!isMini, body =>
             body.child(
               v_flex()
                 .id("sysmon-apps")
@@ -667,7 +736,7 @@ export default class SystemMonitor extends View {
                   }),
                 ),
             ),
-          ),
-      );
+          );
+      });
   }
 }

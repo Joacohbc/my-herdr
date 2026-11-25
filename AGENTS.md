@@ -1,6 +1,6 @@
 # AGENTS.md — `my-herdr`
 
-Personal customization repository for **Herdr App** (`herdr-app`, native Rust/GPUI terminal & AI agent workspace) and `herdr-core` (`hc`), symlinked into `~/.config/herdr-app/`. Includes a custom layout (`my-herdr`), 6 GPUI JavaScript mods (`files-search`, `file-viewer`, `changes-history`, `pane-custom`, `tabs-custom`, `system-monitor`), Material Icon compaction, keyboard bindings, and automatic RAM/GC management.
+Personal customization repository for **Herdr App** (`herdr-app`, native Rust/GPUI terminal & AI agent workspace) and `herdr-core` (`hc`), symlinked into `~/.config/herdr-app/`. Includes a custom layout (`my-herdr`), 9 GPUI JavaScript mods (`files-search`, `file-viewer`, `changes-history`, `pane-custom`, `tabs-custom`, `system-monitor`, `ports-monitor`, `agents-custom`, `web-launcher`), Material Icon compaction, keyboard bindings, and automatic RAM/GC management.
 
 This file holds the rules an agent must follow. Detailed documentation lives in `.docs/` (Spanish) and the domain vocabulary in `.docs/context.md`.
 
@@ -18,11 +18,11 @@ This file holds the rules an agent must follow. Detailed documentation lives in 
 ## Commands
 
 ```bash
-# Link layout + all 6 mods, sync keys.json, and validate all mods
+# Link layout + all 9 mods, sync keys.json, and validate all mods
 ./install.sh
 
 # Validate every custom mod
-for mod in files-search file-viewer pane-custom system-monitor changes-history tabs-custom; do
+for mod in files-search file-viewer pane-custom system-monitor ports-monitor agents-custom changes-history tabs-custom web-launcher; do
   herdr-app check ~/.config/herdr-app/mods/$mod || exit 1
 done
 

@@ -2,7 +2,7 @@
 
 ## 1. Visión General
 
-`my-herdr` es un repositorio Git (`/home/joaco/projects/my-herdr`) que concentra toda la personalización de **Herdr App** (`herdr-app`, interfaz nativa en Rust/GPUI) sobre la máquina local y hosts SSH conectados a `herdr-core` (`rbpil`, `rbpi8gbl`). El script `install.sh` enlaza mediante symlinks el layout y los 6 mods personalizados dentro de `~/.config/herdr-app/` y sincroniza `~/.config/herdr-app/keys.json`.
+`my-herdr` es un repositorio Git (`/home/joaco/projects/my-herdr`) que concentra toda la personalización de **Herdr App** (`herdr-app`, interfaz nativa en Rust/GPUI) sobre la máquina local y hosts SSH conectados a `herdr-core` (`rbpil`, `rbpi8gbl`). El script `install.sh` enlaza mediante symlinks el layout y los 9 mods personalizados dentro de `~/.config/herdr-app/` y sincroniza `~/.config/herdr-app/keys.json`.
 
 ```text
 root (row)
@@ -10,8 +10,9 @@ root (row)
 │   ├── brand            → mod: workspace-chrome        [NATIVO]
 │   ├── sidebar-lists (column)
 │   │   ├── spaces         → mod: spaces                [NATIVO]
-│   │   ├── agents         → mod: agents                [NATIVO]
-│   │   └── system-monitor → mod: system-monitor        [CUSTOM]
+│   │   ├── agents         → mod: agents-custom         [CUSTOM]
+│   │   ├── system-monitor → mod: system-monitor        [CUSTOM]
+│   │   └── ports-monitor  → mod: ports-monitor         [CUSTOM]
 │   └── sidebar-footer   → mod: workspace-chrome        [NATIVO]
 └── work (column)
     ├── tabs             → mod: tabs-custom             [CUSTOM]
@@ -35,8 +36,10 @@ Los mods de Herdr corren en contextos aislados dentro de `gpui-shell` y se comun
 | `file-viewer.open` | `files-search`, `changes-history` | `file-viewer` (no `solo`) | `{ file, root, on, tab, pane, line, col, matchLen, seq }`. Actualiza un visor existente en la pestaña actual sin abrir paneles duplicados. |
 | `file-viewer.meta` | `file-viewer` | `pane-custom`, `system-monitor` | Mapa `{ [paneId]: { file, root, on, line, md, hasPreview, preview, wrap, zoomPct, dirty } }`. Permite que el encabezado unificado muestre controles y `*` sin duplicar barras. |
 | `file-viewer.cmd` | `pane-custom` | `file-viewer` | `{ pane, action: "toggle_preview" \| "toggle_wrap" \| "zoom_in" \| "zoom_out" \| "zoom_reset", seq }`. |
+| `web-launcher.profile` | `web-launcher` | `web-launcher` | ID del último perfil de Chrome seleccionado (`"clean"`, `"Default"`, `"Profile 2"`, etc.). |
+| `ports.http` | `ports-monitor` | `web-launcher` | Lista acotada (máx. `32`) de puertos HTTP/HTTPS activos `[{ url, port, proto, exposure, service, process }]` publicada solo cuando cambia. |
 | `changes.badge` | `changes-history` | `tabs-custom` | `{ count, space }`. Contador de archivos con cambios sin commitear para el badge flotante del botón `Changes`. |
-| `herdr.gc` | `system-monitor` | `files-search`, `file-viewer`, `changes-history` | `{ seq, at, reason }`. Señal de limpieza global que dispara evicción inmediata de cachés e hibernación de pestañas inactivas. |
+| `herdr.gc` | `system-monitor` | `files-search`, `file-viewer`, `changes-history`, `ports-monitor` | `{ seq, at, reason }`. Señal de limpieza global que dispara evicción inmediata de cachés e hibernación de pestañas inactivas. |
 | `tiling.closedPanes` / `tiling.closedTabs` | `pane-custom` | `pane-custom` | Pilas acotadas a 8 elementos deduplicados para `pane-custom.reopen_pane` y `pane-custom.reopen_tab` (`Ctrl + Shift + T`). |
 
 ---
@@ -56,7 +59,7 @@ Cada mod gestiona su memoria en tres capas complementarias:
 
 ---
 
-## 4. Decisiones de Arquitectura (`D1`–`D13`)
+## 4. Decisiones de Arquitectura (`D1`–`D15`)
 
 | ID | Decisión | Alternativa descartada y motivo |
 | --- | --- | --- |
@@ -73,3 +76,5 @@ Cada mod gestiona su memoria en tres capas complementarias:
 | **D11** | Propagar la fuente global `settings().font_family ?? settings().font` en la raíz de todos los mods personalizados. | Sin `.font_family(...)` explícito, GPUI aplicaba la fuente UI por defecto (`Geist`) ignorando la fuente elegida por el usuario en `settings.json`. |
 | **D12** | Leer props de mod siempre con `(initialProps && Object.keys(initialProps).length ? initialProps : null) ?? props()` y truncar `args` de `ps` mediante `awk` en `system-monitor`. | En `tab.new { mod, props }`, `init(initialProps)` puede llegar vacío mientras `props()` contiene el payload real; además, `ps` sin truncar generaba ~85 KB de texto cada 3 s. |
 | **D13** | Integrar búsqueda e inspección de Pull Requests de GitHub en `mods/changes-history/github.js` mediante `gh` CLI bajo demanda (carga perezosa al abrir la sección `Pull Requests`). | Consumir la API REST/GraphQL manualmente exigiría almacenar tokens propios y duplicar autenticación; `gh` reutiliza el keyring local y funciona de forma transparente en repositorios SSH vía `exec(..., { cwd, on })` sin consumo en segundo plano cuando la sección está cerrada. |
+| **D14** | Reemplazar cualquier intento de navegador embebido por el popup ligero `mods/web-launcher/` (abierto desde el botón `Web` de `tabs-custom`), con detección automática de URL en el portapapeles, selector de perfiles reales de Chrome (`~/.config/google-chrome/Local State`) + `Clean` efímero, y lanzamiento como pestaña normal o ventana `--app`. | GPUI (`gpui-kit`) carece de WebView nativo; renderizar páginas por capturas JPEG no reemplaza la fluidez/audio de un navegador real y consume procesos extra. Un lanzador popup efímero aporta cero RAM en reposo y acceso en un clic al navegador real con el perfil deseado. |
+| **D15** | Incorporar `mods/ports-monitor/` como bloque independiente en la barra lateral izquierda (junto a `system-monitor` y `agents-custom`), haciendo que los tres bloques soporten colapso/modo compacto vía `layout.resize` y deteniendo por completo el polling de `system-monitor` y `ports-monitor` cuando están minimizados. | Unificar puertos dentro de `system-monitor` saturaría el panel y acoplaría dos responsabilidades distintas; mantenerlos separados con colapso real y pausa de muestreo (`ss`/`ps`) garantiza bajo consumo de CPU/RAM y máximo espacio útil en el sidebar. |

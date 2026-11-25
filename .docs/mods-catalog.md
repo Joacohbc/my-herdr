@@ -56,18 +56,46 @@ Encabezado unificado para todos los paneles del layout `my-herdr`.
 ### 1.5 `tabs-custom` (`mods/tabs-custom/`)
 Clon personalizado de la barra de pestañas `tabs`.
 
-- **Archivos:** `main.js`, `mod.json`, `win-close.svg`, `win-max.svg`, `win-min.svg`, `win-restore.svg`.
-- **Responsabilidades:** conserva el comportamiento nativo de pestañas y añade un **badge circular flotante** en la esquina superior derecha del botón `Changes` leyendo `shared("changes.badge")`.
+- **Archivos:** `main.js`, `mod.json`, `web.svg`, `win-close.svg`, `win-max.svg`, `win-min.svg`, `win-restore.svg`.
+- **Responsabilidades:** conserva el comportamiento nativo de pestañas, añade el botón `Web` (abre el popup `web-launcher`) y muestra un **badge circular flotante** en la esquina superior derecha del botón `Changes` leyendo `shared("changes.badge")`.
 
 ### 1.6 `system-monitor` (`mods/system-monitor/`)
 Monitor en vivo de CPU, RAM y árbol de procesos en la barra lateral izquierda + motor de limpieza automática.
 
 - **Archivos:** `main.js`, `mod.json`, `icons/*.svg` (Java 32×32, Papirus-Dark, Devicon, Herdr).
 - **Responsabilidades:**
-  - Muestreo compacto vía `ps` + `awk` (`/proc/stat`, `/proc/meminfo` incluyendo Swap), polling adaptativo (`3 s` activo, `8 s` sin foco, pausado si la ventana no es visible).
+  - Muestreo compacto vía `ps` + `awk` (`/proc/stat`, `/proc/meminfo` incluyendo Swap), polling adaptativo (`3 s` activo, `8 s` sin foco, pausado si la ventana no es visible o cuando el panel está minimizado).
+  - Colapsable a barra de `32 px` (`System ▸` / `System ▾` vía `layout.resize`), persistido en `localStorage["sys.collapsed"]`.
   - Atribución profunda por `pid`/`ppid` bajo la aplicación raíz (indicador `+N` y desglose expandible al hacer clic).
   - Modo rail compacto (`width < 140 px`): `C % / R %` + iconos 16×16 con alertas visuales (`<4%`, `4–10%`, `10–20%`, `≥20%`).
   - Limpieza automática cada `60 s` (y botón manual `GC`): purga terminales `finished` con `hc rm`, poda metadatos huérfanos y emite `herdr.gc`.
+
+### 1.7 `web-launcher` (`mods/web-launcher/`)
+Modal centrado (`430×420`) para abrir el navegador o un enlace en un perfil específico de Google Chrome o en una sesión limpia.
+
+- **Archivos:** `main.js`, `mod.json` (`"place": "none"`, `"focusable": true`, overlay `430×420`).
+- **Funcionalidades:**
+  - Detecta automáticamente si hay una URL (`http://`, `https://` o `localhost`) en el portapapeles (`cx.read_from_clipboard()`) y la pre-rellena en el campo de entrada (o recibe `props().url` al abrirse desde `ports-monitor`).
+  - Muestra chips clicables de los puertos HTTP/HTTPS activos publicados en `shared("ports.http")`.
+  - Lista dinámicamente los perfiles instalados en `~/.config/google-chrome/Local State` junto a la opción `Clean` (perfil temporal aislado en `/tmp/herdr-web-clean-*`), recordando la última selección en `shared("web-launcher.profile")`.
+  - Permite abrir en pestaña normal (`Abrir navegador ↗` / `Abrir link ↗`, también con `Enter`) o como ventana minimalista (`App ❐` vía `--app`). Cero procesos ni timers en segundo plano.
+
+### 1.8 `ports-monitor` (`mods/ports-monitor/`)
+Monitor en tiempo real de puertos en escucha en la barra lateral izquierda con clasificación de sistema, detección de protocolo e integración directa con `web-launcher`.
+
+- **Archivos:** `main.js`, `detector.js`, `mod.json`, `icons/*.svg` (`http`, `https`, `db`, `mq`, `tcp`, `udp`, `sys`).
+- **Funcionalidades:**
+  - Muestreo en tiempo real vía `ss -H -tulnp` (`1.5 s` activo, `5 s` sin foco; detenido por completo cuando está minimizado o la ventana oculta), actualizando GPUI solo cuando cambia la firma de puertos.
+  - Diferencia puertos de sistema (puertos conocidos como DNS `53`, mDNS `5353`, CUPS `631`, Tailscale `41641`, `127.0.0.53/54`, daemons OS) con toggle `Sys N`.
+  - Identifica protocolos (`HTTP`, `HTTPS`, `DB`, `MQ`, `TCP`, `UDP`) mediante tabla conocida + sonda HTTP/HTTPS perezosa (`curl`, caché acotada `MAX_PROBE_CACHE = 128`, limpiada en `herdr.gc`), filtros por protocolo (`All | HTTP | DB | TCP | UDP`) y badge de exposición (`localhost`, `0.0.0.0`, `tailscale`).
+  - Clic en puertos HTTP/HTTPS abre el modal `web-launcher` pre-rellenado; clic en otros puertos copia `host:port`. Publica `shared("ports.http")` (máx. `32`).
+  - Colapsable a barra de `32 px` (`Ports ▸` / `Ports ▾` vía `layout.resize`) y modo rail compacto (`width < 140 px`) con iconos + número de puerto.
+
+### 1.9 `agents-custom` (`mods/agents-custom/`)
+Clon personalizado del panel `agents` de la barra lateral izquierda.
+
+- **Archivos:** `main.js`, `mod.json`.
+- **Funcionalidades:** conserva agrupación/prioridad, sub-agentes y pines del mod nativo, hereda la fuente global (**D11**) y añade un **modo compacto vertical** (al pulsar `Agents ▾` o achicar el panel a `< 86 px`, `min: 60 px`) que muestra solo los iconos de los agentes uno al lado del otro con borde/punto de color según estado (`working`, `blocked`, `done`, `idle`).
 
 ---
 
@@ -75,7 +103,7 @@ Monitor en vivo de CPU, RAM y árbol de procesos en la barra lateral izquierda +
 
 | Archivo | Propósito |
 | --- | --- |
-| `install.sh` | Crea los symlinks de `layouts/my-herdr.json` y los 6 mods hacia `~/.config/herdr-app/`, ejecuta `scripts/apply-keys.js` y valida todos los mods con `herdr-app check`. |
+| `install.sh` | Crea los symlinks de `layouts/my-herdr.json` y los 9 mods hacia `~/.config/herdr-app/`, ejecuta `scripts/apply-keys.js` y valida todos los mods con `herdr-app check`. |
 | `scripts/apply-keys.js` | Sincroniza atajos de flechas (`Alt + ←/↓/↑/→`, `Alt + Shift + ←/↓/↑/→`) y pestañas (`Ctrl+T`, `Ctrl+W`, `Ctrl+Shift+T`) en `"global"`, `"layout:my-herdr"` y `"terminal"` dentro de `~/.config/herdr-app/keys.json`. |
 | `scripts/build-icons.js` | Compacta el mapa de Material Icon Theme desde `mods/files-search/material-icons.js` a tablas invertidas perezosas con `releaseIconCache()` para `files-search` (archivos + carpetas) y `changes-history` (solo archivos). |
 | `layouts/my-herdr.json` | Definición del árbol de layout activo en Herdr App. |

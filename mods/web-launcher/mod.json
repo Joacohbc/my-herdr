@@ -1,0 +1,8 @@
+{
+  "place": "none",
+  "focusable": true,
+  "overlay": {
+    "width": 430,
+    "height": 420
+  }
+}
