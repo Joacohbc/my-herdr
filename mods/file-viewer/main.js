@@ -783,9 +783,10 @@ export default class FileViewer extends View {
     if (ac.mode === "columns") {
       if (!ac.cols.length) return null;
       return h_flex()
+        .id("fv-ac-cols")
+        .h(32)
         .flex_none()
         .px(10)
-        .py(5)
         .gap(5)
         .items_center()
         .bg(t.surface)
@@ -817,9 +818,10 @@ export default class FileViewer extends View {
 
     if (!ac.values.length) return null;
     return h_flex()
+      .id("fv-ac-vals")
+      .h(32)
       .flex_none()
       .px(10)
-      .py(5)
       .gap(5)
       .items_center()
       .bg(t.surface)
@@ -1472,6 +1474,7 @@ export default class FileViewer extends View {
               ),
           ),
       )
+      .when(Boolean(autocompleteBar), el => el.child(autocompleteBar))
       .child(
         h_flex()
           .h(30)
@@ -1528,7 +1531,6 @@ export default class FileViewer extends View {
             el.child(div().text_size(11).text_color(t.ansi1).child(this.csvSaveError)),
           ),
       )
-      .when(Boolean(autocompleteBar), el => el.child(autocompleteBar))
       .when(Boolean(filterDropdown), el => el.child(filterDropdown))
       .child(
         div()
