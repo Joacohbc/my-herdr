@@ -119,14 +119,17 @@ export default class FileViewer extends View {
     this.csvUniqueCache = new Map();
     this.csvFilterMenuCol = -1;
     this.csvMenuQuery = "";
+    this.csvAcIndex = 0;
+    this.resizingCol = null;
     this.csvFilterInput = InputState.new({ placeholder: "Search or @Col:val1,val2…" });
     this.csvFilterInput.on("change", (_e, cx) => {
       this.csvFilter = this.csvFilterInput.value();
+      this.csvAcIndex = 0;
       this.rebuildCsvViewRows();
       cx.notify();
     });
     this.csvFilterInput.on("submit", (_e, cx) => {
-      this.acceptTopCsvSuggestion(cx);
+      this.acceptSelectedCsvSuggestion(cx);
     });
     this.csvMenuInput = InputState.new({ placeholder: "Search values…" });
     this.csvMenuInput.on("change", (_e, cx) => {
@@ -244,17 +247,17 @@ export default class FileViewer extends View {
     return Boolean(this.code || this.rawText !== null || this.imageRelPath || this.csvTable || this.pdfRelPath);
   }
 
-  hibernate(cx) {
+  hibernate(cx, fromRender = false) {
     if (this.hibernated || this.csvDirty || !this.hasLoadedContent()) return;
     this.loadSeq++;
     this.releaseBuffers();
     this.loading = false;
     this.pdfPageLoading = false;
     this.hibernated = true;
-    cx?.notify();
+    if (!fromRender) cx?.notify();
   }
 
-  checkHibernation(cx) {
+  checkHibernation(cx, fromRender = false) {
     const gcSeq = shared("herdr.gc")?.seq ?? 0;
     const forceGc = gcSeq !== this.lastGcSeq;
     this.lastGcSeq = gcSeq;
@@ -269,7 +272,7 @@ export default class FileViewer extends View {
           line: this.line,
           col: this.col,
           matchLen: this.matchLen,
-        }, cx);
+        }, cx, fromRender);
       }
       return;
     }
@@ -277,7 +280,7 @@ export default class FileViewer extends View {
     const now = Date.now();
     if (!this.hiddenSince) this.hiddenSince = now;
     if (forceGc || now - this.hiddenSince >= HIBERNATE_IDLE_MS) {
-      this.hibernate(cx);
+      this.hibernate(cx, fromRender);
     }
   }
 
@@ -354,7 +357,7 @@ export default class FileViewer extends View {
     }
   }
 
-  checkCommands(cx) {
+  checkCommands(cx, fromRender = false) {
     const cmd = shared("file-viewer.cmd");
     if (!cmd || !cmd.seq || cmd.seq === this.lastCmdSeq) return;
     const paneId = this.resolvePaneId();
@@ -374,10 +377,10 @@ export default class FileViewer extends View {
       this.fontDelta = 0;
     }
     this.publishMeta();
-    cx.notify();
+    if (!fromRender) cx.notify();
   }
 
-  checkSharedTarget(cx) {
+  checkSharedTarget(cx, fromRender = false) {
     if (this.solo) return;
     const req = shared("file-viewer.open");
     if (!req || !req.seq || req.seq === this.lastSharedSeq) return;
@@ -385,7 +388,7 @@ export default class FileViewer extends View {
     const paneId = this.resolvePaneId();
     if (req.pane && paneId && req.pane !== paneId) return;
     this.lastSharedSeq = req.seq;
-    this.openTarget(req, cx);
+    this.openTarget(req, cx, fromRender);
   }
 
   loadPdfPage(page, cx) {
@@ -420,7 +423,7 @@ export default class FileViewer extends View {
     });
   }
 
-  openTarget(target, cx) {
+  openTarget(target, cx, fromRender = false) {
     const seq = ++this.loadSeq;
     const sameFile = !this.hibernated
       && this.hasLoadedContent()
@@ -448,7 +451,7 @@ export default class FileViewer extends View {
         this.highlightRange = null;
       }
       this.publishMeta();
-      cx.notify();
+      if (!fromRender) cx.notify();
       return;
     }
 
@@ -791,6 +794,7 @@ export default class FileViewer extends View {
     const name = col.header.includes(" ") ? col.letter : col.header;
     const next = `${ac.prefix}@${name}:`;
     this.csvFilter = next;
+    this.csvAcIndex = 0;
     this.csvFilterInput.set_value(next);
     this.rebuildCsvViewRows();
     cx.notify();
@@ -805,19 +809,36 @@ export default class FileViewer extends View {
     const formatted = nextVals.map(v => this.formatTokenVal(v)).join(",");
     const next = `${ac.prefix}${ac.colToken}:${formatted}`;
     this.csvFilter = next;
+    this.csvAcIndex = 0;
     this.csvFilterInput.set_value(next);
     this.rebuildCsvViewRows();
     cx.notify();
   }
 
-  acceptTopCsvSuggestion(cx) {
+  cycleCsvSuggestion(delta, cx) {
     const ac = this.getCsvAutocompleteState();
-    if (!ac) return;
+    if (!ac) return false;
+    const count = ac.mode === "columns" ? ac.cols.length : ac.values.length;
+    if (count === 0) return false;
+    this.csvAcIndex = ((this.csvAcIndex % count) + count + delta) % count;
+    cx.notify();
+    return true;
+  }
+
+  acceptSelectedCsvSuggestion(cx) {
+    const ac = this.getCsvAutocompleteState();
+    if (!ac) return false;
     if (ac.mode === "columns" && ac.cols.length > 0) {
-      this.applyColumnSuggestion(ac, ac.cols[0], cx);
-    } else if (ac.mode === "values" && ac.values.length > 0) {
-      this.toggleValueSuggestion(ac, ac.values[0].value, cx);
+      const idx = Math.max(0, Math.min(ac.cols.length - 1, this.csvAcIndex));
+      this.applyColumnSuggestion(ac, ac.cols[idx], cx);
+      return true;
     }
+    if (ac.mode === "values" && ac.values.length > 0) {
+      const idx = Math.max(0, Math.min(ac.values.length - 1, this.csvAcIndex));
+      this.toggleValueSuggestion(ac, ac.values[idx].value, cx);
+      return true;
+    }
+    return false;
   }
 
   renderCsvAutocompleteBar(t) {
@@ -826,6 +847,7 @@ export default class FileViewer extends View {
 
     if (ac.mode === "columns") {
       if (!ac.cols.length) return null;
+      const activeIdx = Math.max(0, Math.min(ac.cols.length - 1, this.csvAcIndex));
       return h_flex()
         .id("fv-ac-cols")
         .h(32)
@@ -839,8 +861,9 @@ export default class FileViewer extends View {
         .overflow_x_scrollbar()
         .child(div().flex_none().text_size(10.5).text_color(t.dim).child("Columns:"))
         .children(
-          ac.cols.map(col =>
-            h_flex()
+          ac.cols.map((col, idx) => {
+            const isActive = idx === activeIdx;
+            return h_flex()
               .id(`fv-ac-col-${col.colIdx}`)
               .flex_none()
               .px(7)
@@ -848,19 +871,22 @@ export default class FileViewer extends View {
               .gap(4)
               .items_center()
               .rounded(5)
-              .bg(t.raised)
+              .bg(isActive ? t.selected : t.raised)
               .border_1()
-              .border_color(t.border)
+              .border_color(isActive ? t.accent : t.border)
               .cursor_pointer()
               .hover(s => s.bg(t.selected).border_color(t.accent))
               .on_click((_e, cx) => this.applyColumnSuggestion(ac, col, cx))
               .child(div().text_size(10).font_semibold().text_color(t.accent).child(col.letter))
-              .child(div().text_size(11).text_color(t.foreground).child(col.header)),
-          ),
-        );
+              .child(div().text_size(11).text_color(t.foreground).child(col.header));
+          }),
+        )
+        .child(div().flex_1())
+        .child(div().flex_none().text_size(10).text_color(t.dim).child("Tab ↹ · Enter ↵"));
     }
 
     if (!ac.values.length) return null;
+    const activeIdx = Math.max(0, Math.min(ac.values.length - 1, this.csvAcIndex));
     return h_flex()
       .id("fv-ac-vals")
       .h(32)
@@ -876,6 +902,7 @@ export default class FileViewer extends View {
       .children(
         ac.values.map((item, idx) => {
           const isPicked = ac.selectedLower.has(item.value.toLowerCase());
+          const isActive = idx === activeIdx;
           return h_flex()
             .id(`fv-ac-val-${ac.colIdx}-${idx}`)
             .flex_none()
@@ -884,9 +911,9 @@ export default class FileViewer extends View {
             .gap(4)
             .items_center()
             .rounded(5)
-            .bg(isPicked ? t.selected : t.raised)
+            .bg(isActive || isPicked ? t.selected : t.raised)
             .border_1()
-            .border_color(isPicked ? t.accent : t.border)
+            .border_color(isActive ? t.accent : isPicked ? t.accent + "88" : t.border)
             .cursor_pointer()
             .hover(s => s.bg(t.selected).border_color(t.accent))
             .on_click((_e, cx) => this.toggleValueSuggestion(ac, item.value, cx))
@@ -894,7 +921,9 @@ export default class FileViewer extends View {
             .child(div().text_size(11).text_color(t.foreground).child(item.value || "(empty)"))
             .child(div().text_size(10).text_color(t.dim).child(String(item.count)));
         }),
-      );
+      )
+      .child(div().flex_1())
+      .child(div().flex_none().text_size(10).text_color(t.dim).child("Tab ↹ · Enter ↵"));
   }
 
   rebuildCsvViewRows() {
@@ -1275,11 +1304,8 @@ export default class FileViewer extends View {
           .h_full()
           .flex_none()
           .pl(7)
-          .pr(4)
-          .gap(4)
+          .gap(2)
           .items_center()
-          .border_r(1)
-          .border_color(t.border)
           .when(isSorted || isMenuOpen, el => el.bg(t.selected))
           .child(
             h_flex()
@@ -1310,6 +1336,26 @@ export default class FileViewer extends View {
               .tooltip(`Filter values in ${tbl.headers[idx] || columnLetter(idx)}`)
               .on_click((_e, cx) => this.openColFilterMenu(idx, cx))
               .child("▾"),
+          )
+          .child(
+            div()
+              .id(`fv-csv-col-res-${idx}`)
+              .w(6)
+              .h_full()
+              .flex_none()
+              .cursor_col_resize()
+              .flex()
+              .items_center()
+              .justify_end()
+              .hover(s => s.bg(t.accent + "44"))
+              .when(this.resizingCol?.idx === idx, el => el.bg(t.accent + "66"))
+              .tooltip("Drag left/right to resize column")
+              .on_mouse_down("left", (e, cx) => {
+                cx.stop_propagation();
+                this.resizingCol = { idx, startX: e.position?.x ?? 0, startW: tbl.colWidths[idx] };
+                cx.notify();
+              })
+              .child(div().w(1).h_full().bg(this.resizingCol?.idx === idx ? t.accent : t.border)),
           );
       }),
     ];
@@ -1384,7 +1430,8 @@ export default class FileViewer extends View {
           .border_color(t.border)
           .child(
             h_flex()
-              .w(220)
+              .id("fv-csv-filter-box")
+              .w(240)
               .h(24)
               .px(7)
               .gap(4)
@@ -1393,6 +1440,17 @@ export default class FileViewer extends View {
               .bg(t.background)
               .border_1()
               .border_color(t.border)
+              .on_key_down((e, cx) => {
+                if (e.key === "tab") {
+                  if (this.cycleCsvSuggestion(e.modifiers?.shift ? -1 : 1, cx)) {
+                    cx.stop_propagation();
+                  }
+                } else if (e.key === "enter") {
+                  if (this.acceptSelectedCsvSuggestion(cx)) {
+                    cx.stop_propagation();
+                  }
+                }
+              })
               .child(Input.new(this.csvFilterInput).flex_1().h_full().text_size(11.5).text_color(t.foreground))
               .when(Boolean(this.csvFilter), el =>
                 el.child(
@@ -1618,9 +1676,9 @@ export default class FileViewer extends View {
 
   render(cx) {
     if (!checking()) {
-      this.checkSharedTarget(cx);
-      this.checkCommands(cx);
-      this.checkHibernation(cx);
+      this.checkSharedTarget(cx, true);
+      this.checkCommands(cx, true);
+      this.checkHibernation(cx, true);
       this.publishMeta();
     }
     const t = theme();
@@ -1671,6 +1729,18 @@ export default class FileViewer extends View {
       .text_color(t.foreground)
       .text_size(13)
       .when(Boolean(fontFamily), el => el.font_family(fontFamily))
+      .on_mouse_move((e, cx) => {
+        if (!this.resizingCol || !this.csvTable) return;
+        const z = settings().zoom || 1;
+        const dx = ((e.position?.x ?? 0) - this.resizingCol.startX) / z;
+        this.csvTable.colWidths[this.resizingCol.idx] = Math.round(Math.max(56, Math.min(640, this.resizingCol.startW + dx)));
+        cx.notify();
+      })
+      .on_mouse_up("left", (_e, cx) => {
+        if (!this.resizingCol) return;
+        this.resizingCol = null;
+        cx.notify();
+      })
       .on_scroll_wheel((e, cx) => {
         if (!e.modifiers?.control && !e.modifiers?.platform) return;
         const dy = e.delta?.y ?? 0;
