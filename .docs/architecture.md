@@ -56,7 +56,7 @@ Cada mod gestiona su memoria en tres capas complementarias:
 
 ---
 
-## 4. Decisiones de Arquitectura (`D1`–`D12`)
+## 4. Decisiones de Arquitectura (`D1`–`D13`)
 
 | ID | Decisión | Alternativa descartada y motivo |
 | --- | --- | --- |
@@ -72,3 +72,4 @@ Cada mod gestiona su memoria en tres capas complementarias:
 | **D10** | Confirmación explícita obligatoria en `changes-history` antes de descartar cambios (`git checkout`), borrar archivos sin seguimiento (`git clean -fd`) o eliminar stashes (`git stash drop`). | Un clic accidental en `↺` o `×` destruía trabajo local de forma irreversible. |
 | **D11** | Propagar la fuente global `settings().font_family ?? settings().font` en la raíz de todos los mods personalizados. | Sin `.font_family(...)` explícito, GPUI aplicaba la fuente UI por defecto (`Geist`) ignorando la fuente elegida por el usuario en `settings.json`. |
 | **D12** | Leer props de mod siempre con `(initialProps && Object.keys(initialProps).length ? initialProps : null) ?? props()` y truncar `args` de `ps` mediante `awk` en `system-monitor`. | En `tab.new { mod, props }`, `init(initialProps)` puede llegar vacío mientras `props()` contiene el payload real; además, `ps` sin truncar generaba ~85 KB de texto cada 3 s. |
+| **D13** | Integrar búsqueda e inspección de Pull Requests de GitHub en `mods/changes-history/github.js` mediante `gh` CLI bajo demanda (carga perezosa al abrir la sección `Pull Requests`). | Consumir la API REST/GraphQL manualmente exigiría almacenar tokens propios y duplicar autenticación; `gh` reutiliza el keyring local y funciona de forma transparente en repositorios SSH vía `exec(..., { cwd, on })` sin consumo en segundo plano cuando la sección está cerrada. |

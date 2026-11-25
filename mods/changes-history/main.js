@@ -2,12 +2,16 @@ import { View, div, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar, v_virtual_list } from "gpui-base";
 import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, window, layout, checking, run, shared, setShared, props } from "herdr";
 import { fileIcon, releaseIconCache } from "./material-icons.js";
+import { listPullRequests, loadPullRequestDetail, checkoutPullRequest } from "./github.js";
 
 const scans = globalThis[Symbol.for("herdr.changesStatus.v3")] ??= new Map();
 const MAX_SCANS = 4;
 const MAX_DIFF_LINES = 1000;
 const MAX_DIFF_LINE_CHARS = 2000;
 const MAX_HISTORY_LIMIT = 200;
+const MAX_BRANCHES = 150;
+const GRAPH_SEARCH_DEBOUNCE_MS = 220;
+const PR_SEARCH_DEBOUNCE_MS = 280;
 const IDLE_CLEAN_MS = 30_000;
 const HIBERNATE_IDLE_MS = 45_000;
 const HIDDEN_BADGE_POLL_MS = 15_000;
@@ -147,12 +151,27 @@ function statusColor(status, t) {
   return t.blocked;
 }
 
+function prStateColor(pr, t) {
+  if (pr.isDraft) return t.dim;
+  if (pr.state === "MERGED") return t.ansi5;
+  if (pr.state === "CLOSED") return t.ansi1;
+  return t.ansi2;
+}
+
+function prStateLabel(pr) {
+  if (pr.isDraft) return "Draft";
+  if (pr.state === "MERGED") return "Merged";
+  if (pr.state === "CLOSED") return "Closed";
+  return "Open";
+}
+
 export default class ChangesHistory extends View {
   init(initialProps, cx) {
     const p = (initialProps && Object.keys(initialProps).length ? initialProps : null) ?? props();
     this.standaloneCommit = Boolean(p?.commit && p?.root);
     this.standaloneFileDiff = Boolean(p?.fileDiff && p?.root);
-    this.standalone = this.standaloneCommit || this.standaloneFileDiff;
+    this.standalonePr = Boolean(p?.pr && p?.root);
+    this.standalone = this.standaloneCommit || this.standaloneFileDiff || this.standalonePr;
     this.standaloneFile = this.standaloneFileDiff ? p.fileDiff : null;
     this.branch = "";
     this.staged = [];
@@ -169,6 +188,7 @@ export default class ChangesHistory extends View {
     this.secChanges = true;
     this.secStashes = false;
     this.secGraph = false;
+    this.secPrs = false;
     this.hoveredRow = null;
     this.pendingConfirm = null;
     const savedH = Number(localStorage.getItem("sc.bottomH"));
@@ -181,6 +201,13 @@ export default class ChangesHistory extends View {
     this.historyLoading = false;
     this.historyError = null;
     this.historyLoadedFor = null;
+    this.historySeq = 0;
+    this.graphQuery = "";
+    this.graphBranchRef = "";
+    this.graphBranchLabel = "";
+    this.branches = [];
+    this.branchesLoadedFor = null;
+    this.branchPickerOpen = false;
     this.selectedCommit = null;
     this.commitFiles = [];
     this.commitOpenFile = null;
@@ -188,6 +215,23 @@ export default class ChangesHistory extends View {
     this.commitLongest = 0;
     this.commitGutterChars = 4;
     this.commitDetailLoading = false;
+
+    this.prs = [];
+    this.prState = "open";
+    this.prQuery = "";
+    this.prLoading = false;
+    this.prError = null;
+    this.prLoadedFor = null;
+    this.prSeq = 0;
+    this.selectedPr = null;
+    this.prFiles = [];
+    this.prOpenFile = null;
+    this.prDiffByFile = new Map();
+    this.prRows = [];
+    this.prLongest = 0;
+    this.prGutterChars = 4;
+    this.prDetailLoading = false;
+    this.prCheckingOut = false;
 
     this.hiddenSince = 0;
     this.evicted = false;
@@ -208,6 +252,26 @@ export default class ChangesHistory extends View {
       this.input.on("submit", (_e, cx) => this.commit(cx));
       this.input.on("focus", (_e, cx) => { this.typing = true; cx.notify(); });
       this.input.on("blur", (_e, cx) => { this.typing = false; cx.notify(); });
+
+      this.graphSearchInput = InputState.new({ placeholder: "Search commits..." });
+      this.graphSearchInput.on("change", (_e, cx) => {
+        this.graphQuery = this.graphSearchInput.value();
+        this.scheduleHistorySearch(cx);
+        cx.notify();
+      });
+      this.graphSearchInput.on("submit", (_e, cx) => this.loadHistory(cx, true));
+      this.graphSearchInput.on("focus", (_e, cx) => { this.typing = true; cx.notify(); });
+      this.graphSearchInput.on("blur", (_e, cx) => { this.typing = false; cx.notify(); });
+
+      this.prSearchInput = InputState.new({ placeholder: "Search PRs (title, author, #)..." });
+      this.prSearchInput.on("change", (_e, cx) => {
+        this.prQuery = this.prSearchInput.value();
+        this.schedulePrSearch(cx);
+        cx.notify();
+      });
+      this.prSearchInput.on("submit", (_e, cx) => this.loadPullRequests(cx));
+      this.prSearchInput.on("focus", (_e, cx) => { this.typing = true; cx.notify(); });
+      this.prSearchInput.on("blur", (_e, cx) => { this.typing = false; cx.notify(); });
     }
 
     if (checking()) return;
@@ -228,6 +292,14 @@ export default class ChangesHistory extends View {
       cx.timer.every(15_000, cx => this.checkStandaloneHibernation(cx));
       return;
     }
+    if (this.standalonePr) {
+      this.root = p.root;
+      this.on = p.on ?? null;
+      this.context = { key: `pr:${p.pr.number}`, on: this.on, dirtyAt: 0 };
+      this.openPullRequest(p.pr, cx);
+      cx.timer.every(15_000, cx => this.checkStandaloneHibernation(cx));
+      return;
+    }
     if (isChangesPanelVisible()) this.refresh(cx);
     else this.refreshBadgeCount(cx);
     cx.timer.every(1000, cx => this.refreshIfDue(cx));
@@ -237,6 +309,8 @@ export default class ChangesHistory extends View {
     this.context?.watch?.pending?.cancel();
     this.evictCaches();
     this.input?.release();
+    this.graphSearchInput?.release();
+    this.prSearchInput?.release();
   }
 
   publishBadgeCount(count, spaceId) {
@@ -291,10 +365,20 @@ export default class ChangesHistory extends View {
     this.commits = [];
     this.historyLimit = 50;
     this.historyLoadedFor = null;
+    this.branches = [];
+    this.branchesLoadedFor = null;
+    this.branchPickerOpen = false;
     this.selectedCommit = null;
     this.commitFiles = [];
     this.commitOpenFile = null;
     this.setCommitLines([]);
+    this.prs = [];
+    this.prLoadedFor = null;
+    this.selectedPr = null;
+    this.prFiles = [];
+    this.prOpenFile = null;
+    this.prDiffByFile.clear();
+    this.setPrLines([]);
     scans.clear();
     releaseIconCache();
     this.evicted = true;
@@ -326,6 +410,7 @@ export default class ChangesHistory extends View {
         this.hibernated = false;
         if (this.standaloneCommit && this.selectedCommit) this.openCommit(this.selectedCommit, cx);
         else if (this.standaloneFileDiff && this.standaloneFile) this.loadStandaloneFileDiff(cx);
+        else if (this.standalonePr && this.selectedPr) this.openPullRequest(this.selectedPr, cx);
       }
       return;
     }
@@ -337,6 +422,9 @@ export default class ChangesHistory extends View {
         this.hibernated = true;
         this.commitFiles = [];
         this.setCommitLines([]);
+        this.prFiles = [];
+        this.prDiffByFile.clear();
+        this.setPrLines([]);
         this.setLines([]);
         releaseIconCache();
         cx.notify();
@@ -411,10 +499,28 @@ export default class ChangesHistory extends View {
     this.historyLoading = false;
     this.historyError = null;
     this.historyLoadedFor = null;
+    this.graphQuery = "";
+    this.graphSearchInput?.set_value("");
+    this.graphBranchRef = "";
+    this.graphBranchLabel = "";
+    this.branches = [];
+    this.branchesLoadedFor = null;
+    this.branchPickerOpen = false;
     this.selectedCommit = null;
     this.commitFiles = [];
     this.commitOpenFile = null;
     this.setCommitLines([]);
+    this.prs = [];
+    this.prLoading = false;
+    this.prError = null;
+    this.prLoadedFor = null;
+    this.prQuery = "";
+    this.prSearchInput?.set_value("");
+    this.selectedPr = null;
+    this.prFiles = [];
+    this.prOpenFile = null;
+    this.prDiffByFile.clear();
+    this.setPrLines([]);
   }
 
   refresh(cx, force = false) {
@@ -526,7 +632,11 @@ export default class ChangesHistory extends View {
         }
 
         if (this.secGraph && (force || this.historyLoadedFor !== root)) {
+          this.loadBranches(cx);
           this.loadHistory(cx, true);
+        }
+        if (this.secPrs && (force || this.prLoadedFor !== root)) {
+          this.loadPullRequests(cx);
         }
       } catch (e) { if (this.current(context)) this.error = String(e); }
       finally {
@@ -772,22 +882,81 @@ export default class ChangesHistory extends View {
     cx.notify();
   }
 
+  scheduleHistorySearch(cx) {
+    const seq = ++this.historySeq;
+    cx.spawn(async cx => {
+      await cx.sleep(GRAPH_SEARCH_DEBOUNCE_MS);
+      if (seq !== this.historySeq) return;
+      this.loadHistory(cx, true);
+    });
+  }
+
+  loadBranches(cx) {
+    const context = this.context, root = this.root, on = this.on;
+    if (!root) return;
+    cx.spawn(async cx => {
+      try {
+        const r = await exec(
+          "git",
+          [...READ, "for-each-ref", "--sort=-committerdate", "--format=%(refname:short)%x1f%(refname)", "refs/heads", "refs/remotes"],
+          { cwd: root, on, timeout: 6000 },
+        );
+        if (!this.current(context) || r.code !== 0) return;
+        const parsed = [];
+        for (const line of (r.stdout || "").split("\n")) {
+          if (!line) continue;
+          const [label, fullRef] = line.split("\x1f");
+          if (!label || !fullRef || label.endsWith("/HEAD")) continue;
+          parsed.push({ label, fullRef, isRemote: fullRef.startsWith("refs/remotes/") });
+          if (parsed.length >= MAX_BRANCHES) break;
+        }
+        this.branches = parsed;
+        this.branchesLoadedFor = root;
+        cx.notify();
+      } catch {
+        // Ignore transient branch listing errors
+      }
+    });
+  }
+
+  selectGraphBranch(ref, label, cx) {
+    this.graphBranchRef = ref;
+    this.graphBranchLabel = label;
+    this.branchPickerOpen = false;
+    this.loadHistory(cx, true);
+  }
+
   loadHistory(cx, reset = false) {
     const context = this.context, root = this.root, on = this.on;
     if (!root) return;
     if (reset) this.historyLimit = 50;
     const limit = this.historyLimit;
+    const seq = ++this.historySeq;
+    const query = this.graphQuery.trim();
+    const branchRef = this.graphBranchRef;
     this.historyLoading = true;
     this.historyError = null;
 
+    const args = [
+      ...READ,
+      "log",
+      "-n",
+      String(limit),
+      "--pretty=format:%H%x1f%h%x1f%an%x1f%ar%x1f%cs%x1f%D%x1f%s",
+    ];
+    if (query) {
+      args.push("--fixed-strings", "--regexp-ignore-case", `--grep=${query}`);
+    }
+    if (branchRef === "__all__") {
+      args.push("--all");
+    } else if (branchRef) {
+      args.push(branchRef);
+    }
+
     cx.spawn(async cx => {
       try {
-        const r = await exec(
-          "git",
-          [...READ, "log", "-n", String(limit), "--pretty=format:%H%x1f%h%x1f%an%x1f%ar%x1f%D%x1f%s"],
-          { cwd: root, on, timeout: 8000 },
-        );
-        if (!this.current(context)) return;
+        const r = await exec("git", args, { cwd: root, on, timeout: 8000 });
+        if (!this.current(context) || seq !== this.historySeq) return;
         if (r.code !== 0) {
           const err = (r.stderr || "").trim();
           if (err.includes("does not have any commits")) { this.commits = []; this.historyError = null; }
@@ -797,13 +966,14 @@ export default class ChangesHistory extends View {
         const parsed = [];
         for (const line of (r.stdout || "").split("\n")) {
           if (!line) continue;
-          const [hash, shortHash, author, relDate, refs, ...subjectParts] = line.split("\x1f");
+          const [hash, shortHash, author, relDate, date, refs, ...subjectParts] = line.split("\x1f");
           if (!hash) continue;
           parsed.push({
             hash,
             shortHash: shortHash || hash.slice(0, 7),
             author: author || "",
             relDate: relDate || "",
+            date: date || "",
             refs: (refs || "").split(",").map(s => s.trim()).filter(Boolean),
             subject: subjectParts.join("\x1f") || "(no message)",
           });
@@ -812,9 +982,9 @@ export default class ChangesHistory extends View {
         this.historyLoadedFor = root;
         this.historyError = null;
       } catch (e) {
-        if (this.current(context)) this.historyError = String(e.message || e);
+        if (this.current(context) && seq === this.historySeq) this.historyError = String(e.message || e);
       } finally {
-        if (this.current(context)) { this.historyLoading = false; cx.notify(); }
+        if (this.current(context) && seq === this.historySeq) { this.historyLoading = false; cx.notify(); }
       }
     });
     cx.notify();
@@ -827,6 +997,7 @@ export default class ChangesHistory extends View {
       shortHash: commit.shortHash,
       author: commit.author,
       relDate: commit.relDate,
+      date: commit.date || "",
       subject: commit.subject,
     };
     const tabTitle = `${commit.shortHash} ${commit.subject}`.slice(0, 32);
@@ -928,6 +1099,122 @@ export default class ChangesHistory extends View {
     this.commitRows = diffRows(lines);
     this.commitLongest = Math.max(0, ...this.commitRows.map(r => displayColumns(r.text)));
     this.commitGutterChars = Math.max(4, String(Math.max(0, ...this.commitRows.map(r => r.number ?? 0))).length);
+  }
+
+  setPrLines(lines) {
+    this.prRows = diffRows(lines);
+    this.prLongest = Math.max(0, ...this.prRows.map(r => displayColumns(r.text)));
+    this.prGutterChars = Math.max(4, String(Math.max(0, ...this.prRows.map(r => r.number ?? 0))).length);
+  }
+
+  schedulePrSearch(cx) {
+    const seq = ++this.prSeq;
+    cx.spawn(async cx => {
+      await cx.sleep(PR_SEARCH_DEBOUNCE_MS);
+      if (seq !== this.prSeq) return;
+      this.loadPullRequests(cx);
+    });
+  }
+
+  loadPullRequests(cx) {
+    const context = this.context, root = this.root, on = this.on;
+    if (!root) return;
+    const seq = ++this.prSeq;
+    const state = this.prState;
+    const query = this.prQuery.trim();
+    this.prLoading = true;
+    this.prError = null;
+
+    cx.spawn(async cx => {
+      const result = await listPullRequests(root, on, { state, query, limit: 30 });
+      if (!this.current(context) || seq !== this.prSeq) return;
+      this.prLoading = false;
+      this.prLoadedFor = root;
+      if (!result.ok) {
+        this.prs = [];
+        this.prError = result.error;
+      } else {
+        this.prs = result.prs;
+        this.prError = null;
+      }
+      cx.notify();
+    });
+    cx.notify();
+  }
+
+  openPullRequestInNewTab(pr) {
+    if (!pr || !this.root) return;
+    const plainPr = { ...pr };
+    const tabTitle = `#${pr.number} ${pr.title}`.slice(0, 32);
+    const res = run("tab.new", {
+      name: tabTitle,
+      mod: "changes-history",
+      props: { pr: plainPr, root: this.root, on: this.on ?? null },
+    });
+    if (res?.pane) {
+      run("pane.rename", { pane: res.pane, name: `PR #${pr.number} · ${pr.title}` });
+    }
+  }
+
+  openPullRequest(pr, cx) {
+    this.selectedCommit = null;
+    this.selectedPr = pr;
+    this.prFiles = [];
+    this.prOpenFile = null;
+    this.prDiffByFile.clear();
+    this.setPrLines([]);
+    this.prDetailLoading = true;
+
+    const context = this.context, root = this.root, on = this.on, num = pr.number;
+    cx.spawn(async cx => {
+      const result = await loadPullRequestDetail(root, on, num, MAX_DIFF_LINES, MAX_DIFF_LINE_CHARS);
+      if (!this.current(context) || this.selectedPr?.number !== num) return;
+      this.prDetailLoading = false;
+      if (!result.ok) {
+        this.setPrLines([result.error || "Cannot load pull request"]);
+        cx.notify();
+        return;
+      }
+      this.selectedPr = result.pr || pr;
+      this.prFiles = result.files;
+      this.prDiffByFile = result.diffByFile;
+      if (this.prFiles.length) {
+        this.prOpenFile = this.prFiles[0].path;
+        this.setPrLines(this.prDiffByFile.get(this.prOpenFile) ?? ["Binary file or empty diff"]);
+      } else {
+        this.setPrLines(["No files changed"]);
+      }
+      cx.notify();
+    });
+    cx.notify();
+  }
+
+  pickPrFile(path, cx) {
+    if (!this.selectedPr) return;
+    this.prOpenFile = path;
+    this.setPrLines(this.prDiffByFile.get(path) ?? ["Binary file or empty diff"]);
+    cx.notify();
+  }
+
+  checkoutSelectedPr(cx) {
+    const pr = this.selectedPr;
+    if (!pr || !this.root || this.prCheckingOut) return;
+    const context = this.context, root = this.root, on = this.on;
+    this.prCheckingOut = true;
+    this.note = null;
+    cx.spawn(async cx => {
+      const res = await checkoutPullRequest(root, on, pr.number);
+      if (!this.current(context)) return;
+      this.prCheckingOut = false;
+      if (!res.ok) {
+        this.note = res.error || "Checkout failed";
+      } else {
+        this.historyLoadedFor = null;
+        if (!this.standalone) this.refresh(cx, true);
+      }
+      cx.notify();
+    });
+    cx.notify();
   }
 
   gutter(chars, size) { return Math.ceil(chars * charWidth(size)) + 2; }
@@ -1063,7 +1350,7 @@ export default class ChangesHistory extends View {
               .child(div().px(5).py(1).rounded(4).bg(t.selected).text_size(11).font_semibold().text_color(t.accent).child(c.shortHash))
               .child(div().flex_1().min_w(0).truncate().font_medium().text_size(12).text_color(t.foreground).child(c.subject)),
           )
-          .child(div().pl(this.standaloneCommit ? 4 : 24).text_size(11).text_color(t.dim).child(`${c.author} · ${c.relDate} · ${this.commitFiles.length} file${this.commitFiles.length === 1 ? "" : "s"}`)),
+          .child(div().pl(this.standaloneCommit ? 4 : 24).text_size(11).text_color(t.dim).child(`${c.author} · ${c.date ? `${c.date} (${c.relDate})` : c.relDate} · ${this.commitFiles.length} file${this.commitFiles.length === 1 ? "" : "s"}`)),
       )
       .child(
         div()
@@ -1138,6 +1425,132 @@ export default class ChangesHistory extends View {
               ),
           )
           .child(Scrollbar.vertical("hist-diff").viewport_from_layout().absolute().inset_0()),
+      );
+  }
+
+  renderPrDetail(t, size) {
+    const pr = this.selectedPr;
+    const stateColor = prStateColor(pr, t);
+    const prDate = pr.updatedDate || pr.createdDate || "";
+    const branchSummary = pr.headRefName && pr.baseRefName ? `${pr.headRefName} → ${pr.baseRefName}` : pr.headRefName;
+
+    return v_flex()
+      .flex_1()
+      .min_h(0)
+      .child(
+        v_flex()
+          .flex_none()
+          .px(10)
+          .py(8)
+          .gap(4)
+          .border_b(1)
+          .border_color(t.border)
+          .child(
+            h_flex()
+              .gap(6)
+              .items_center()
+              .when(!this.standalonePr, el =>
+                el.child(this.actionBtn(t, "pr-back", "←", "Back to Source Control", (_e, cx) => {
+                  this.selectedPr = null;
+                  this.prFiles = [];
+                  this.prOpenFile = null;
+                  this.prDiffByFile.clear();
+                  this.setPrLines([]);
+                  cx.notify();
+                })),
+              )
+              .child(div().px(5).py(1).rounded(4).bg(stateColor + "22").text_size(10.5).font_semibold().text_color(stateColor).child(`#${pr.number} · ${prStateLabel(pr)}`))
+              .child(div().flex_1().min_w(0).truncate().font_medium().text_size(12).text_color(t.foreground).child(pr.title))
+              .when(!this.standalonePr, el =>
+                el.child(this.actionBtn(t, "pr-tab", "↗Tab", "Open PR in new tab", () => this.openPullRequestInNewTab(pr))),
+              )
+              .child(this.actionBtn(t, "pr-checkout", this.prCheckingOut ? "…" : "Checkout", "Checkout PR branch locally (gh pr checkout)", (_e, cx) => this.checkoutSelectedPr(cx)))
+              .when(Boolean(pr.url), el =>
+                el.child(this.actionBtn(t, "pr-browser", "↗", "Open PR in browser", (_e, cx) => cx.open_url(pr.url))),
+              ),
+          )
+          .child(
+            div()
+              .pl(this.standalonePr ? 4 : 24)
+              .text_size(11)
+              .text_color(t.dim)
+              .truncate()
+              .child(`@${pr.author}${prDate ? ` · ${prDate}` : ""}${branchSummary ? ` · ${branchSummary}` : ""} · +${pr.additions} −${pr.deletions} · ${this.prFiles.length} file${this.prFiles.length === 1 ? "" : "s"}`),
+          ),
+      )
+      .child(
+        div()
+          .flex_1()
+          .min_h(44)
+          .max_h(Math.min(200, this.prFiles.length * 26 + 12))
+          .relative()
+          .border_b(1)
+          .border_color(t.border)
+          .child(
+            v_flex()
+              .id("pr-files-list")
+              .absolute()
+              .inset_0()
+              .overflow_y_scroll()
+              .p(6)
+              .children(
+                this.prFiles.map(f => {
+                  const parts = f.path.split("/"), name = parts.pop();
+                  return h_flex()
+                    .id(`prf-${f.path}`)
+                    .h(26)
+                    .flex_none()
+                    .px(8)
+                    .gap(6)
+                    .items_center()
+                    .rounded(6)
+                    .cursor_pointer()
+                    .when(this.prOpenFile === f.path, e => e.bg(t.selected))
+                    .hover(s => s.bg(t.hover))
+                    .on_click((_e, cx) => this.pickPrFile(f.path, cx))
+                    .child(image(fileIcon(name)).w(15).h(15).flex_none())
+                    .child(div().flex_none().max_w(160).truncate().text_size(12).text_color(t.foreground).child(name))
+                    .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(parts.join("/")))
+                    .when(f.add > 0, e => e.child(div().text_size(10.5).text_color(t.ansi2).child(`+${f.add}`)))
+                    .when(f.del > 0, e => e.child(div().text_size(10.5).text_color(t.ansi1).child(`−${f.del}`)))
+                    .child(div().w(14).text_right().text_size(11).font_semibold().text_color(statusColor(f.status, t)).child(f.status));
+                }),
+              )
+              .when(!this.prFiles.length, e =>
+                e.child(div().p(8).text_size(12).text_color(t.dim).child(this.prDetailLoading ? "Loading pull request…" : "No files changed")),
+              ),
+          )
+          .child(Scrollbar.vertical("pr-files-list").absolute().inset_0()),
+      )
+      .child(
+        div()
+          .flex_1()
+          .min_h(0)
+          .relative()
+          .font_family(settings().font_family ?? "JetBrains Mono")
+          .text_size(size)
+          .child(
+            div()
+              .id("pr-diff-x")
+              .size_full()
+              .overflow_x_scrollbar()
+              .child(
+                div()
+                  .w_full()
+                  .min_w(Math.max(300, this.prLongest * charWidth(size) + this.gutter(this.prGutterChars, size) + 20))
+                  .h_full()
+                  .child(
+                    v_virtual_list(
+                      "pr-diff",
+                      this.prRows.length,
+                      rowHeight(size),
+                      (i) => String(i),
+                      (range) => this.prRows.slice(range.start, range.end).map((row) => this.diffRow(row, t, size, this.prGutterChars)),
+                    ).size_full(),
+                  ),
+              ),
+          )
+          .child(Scrollbar.vertical("pr-diff").viewport_from_layout().absolute().inset_0()),
       );
   }
 
@@ -1216,6 +1629,18 @@ export default class ChangesHistory extends View {
       if (!checking()) this.checkStandaloneHibernation(cx);
       return this.renderStandaloneFileDiff(t, size).when(Boolean(fontFamily), el => el.font_family(fontFamily));
     }
+    if (this.standalonePr && this.selectedPr) {
+      if (!checking()) this.checkStandaloneHibernation(cx);
+      return v_flex()
+        .id("changes-pr-tab")
+        .size_full()
+        .min_h(0)
+        .bg(t.background)
+        .text_color(t.foreground)
+        .text_size(13)
+        .when(Boolean(fontFamily), el => el.font_family(fontFamily))
+        .child(this.renderPrDetail(t, size));
+    }
     if (!checking()) {
       if (isChangesPanelVisible() && key() !== this.context?.key) this.refresh(cx);
       else this.refreshIfDue(cx);
@@ -1266,6 +1691,12 @@ export default class ChangesHistory extends View {
           cx.notify();
           return;
         }
+        if (e.key === "escape" && this.branchPickerOpen) {
+          this.branchPickerOpen = false;
+          cx.stop_propagation();
+          cx.notify();
+          return;
+        }
         if (e.key === "escape" && this.typing) {
           this.typing = false;
           this.handle.focus();
@@ -1296,7 +1727,8 @@ export default class ChangesHistory extends View {
           ),
       )
       .when(Boolean(this.selectedCommit), el => el.child(this.renderCommitDetail(t, size)))
-      .when(!this.selectedCommit, el =>
+      .when(!this.selectedCommit && Boolean(this.selectedPr), el => el.child(this.renderPrDetail(t, size)))
+      .when(!this.selectedCommit && !this.selectedPr, el =>
         el
           // VS Code-style top Commit Box
           .when(Boolean(this.root), box =>
@@ -1418,7 +1850,10 @@ export default class ChangesHistory extends View {
             e.child(div().flex_1().p(12).text_size(12).text_color(t.dim).child(this.error || (this.loading ? "Loading…" : "Not a git repository"))),
           )
           .when(Boolean(this.root), body => {
-            const bottomOpen = this.secStashes || this.secGraph;
+            const bottomOpen = this.secStashes || this.secGraph || this.secPrs;
+            const activeBranchLabel = this.graphBranchRef === "__all__"
+              ? "All"
+              : (this.graphBranchLabel || this.branch || "HEAD");
             return body
               .child(
                 v_flex()
@@ -1468,8 +1903,9 @@ export default class ChangesHistory extends View {
                   .tooltip("Drag up/down to resize Stashes & Graph")
                   .on_mouse_down("left", (e, cx) => {
                     cx.stop_propagation();
-                    if (!this.secStashes && !this.secGraph) {
+                    if (!this.secStashes && !this.secGraph && !this.secPrs) {
                       this.secGraph = true;
+                      if (this.branchesLoadedFor !== this.root) this.loadBranches(cx);
                       if (this.historyLoadedFor !== this.root && !this.historyLoading) {
                         this.loadHistory(cx, true);
                       }
@@ -1528,27 +1964,144 @@ export default class ChangesHistory extends View {
                         this.secGraph = !this.secGraph;
                         if (!this.secGraph) {
                           this.commits = [];
+                          this.branches = [];
+                          this.branchesLoadedFor = null;
+                          this.branchPickerOpen = false;
                           this.historyLimit = 50;
                           this.historyLoadedFor = null;
                           cx.notify();
                           return;
                         }
+                        if (this.branchesLoadedFor !== this.root) this.loadBranches(cx);
                         if (this.historyLoadedFor !== this.root && !this.historyLoading) {
                           this.loadHistory(cx, true);
                         } else {
                           cx.notify();
                         }
-                      }, this.secGraph ? [this.actionBtn(t, "sc-hist-ref", "↻", "Refresh history", (_e, cx) => this.loadHistory(cx, true))] : [])),
+                      }, this.secGraph ? [
+                        div()
+                          .id("sc-branch-picker-btn")
+                          .px(6)
+                          .py(1)
+                          .rounded(4)
+                          .bg(this.branchPickerOpen ? t.selected : t.surface)
+                          .border_1()
+                          .border_color(this.branchPickerOpen ? t.accent : t.border)
+                          .text_size(10.5)
+                          .text_color(this.branchPickerOpen ? t.foreground : t.muted)
+                          .max_w(120)
+                          .truncate()
+                          .cursor_pointer()
+                          .hover(s => s.bg(t.hover).text_color(t.foreground))
+                          .tooltip(`Branch filter: ${activeBranchLabel}\nClick to choose branch`)
+                          .on_click((_e, cx) => {
+                            cx.stop_propagation();
+                            this.branchPickerOpen = !this.branchPickerOpen;
+                            if (this.branchPickerOpen && this.branchesLoadedFor !== this.root) {
+                              this.loadBranches(cx);
+                            }
+                            cx.notify();
+                          })
+                          .child(`⎇ ${activeBranchLabel} ▾`),
+                        this.actionBtn(t, "sc-hist-ref", "↻", "Refresh history", (_e, cx) => {
+                          this.loadBranches(cx);
+                          this.loadHistory(cx, true);
+                        }),
+                      ] : [])),
                   )
                   .when(this.secGraph, list =>
                     list.child(
                       v_flex()
                         .px(4)
                         .pb(6)
-                        .gap(1)
+                        .gap(3)
+                        .child(
+                          h_flex()
+                            .id("graph-search-box")
+                            .mx(4)
+                            .mt(2)
+                            .h(26)
+                            .px(7)
+                            .gap(4)
+                            .items_center()
+                            .rounded(6)
+                            .bg(t.surface)
+                            .border_1()
+                            .border_color(t.border)
+                            .cursor_text()
+                            .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+                            .child(Input.new(this.graphSearchInput).flex_1().h_full().text_size(11.5).text_color(t.foreground))
+                            .when(Boolean(this.graphQuery), clr =>
+                              clr.child(this.actionBtn(t, "graph-search-clear", "×", "Clear search", (_e, cx) => {
+                                this.graphQuery = "";
+                                this.graphSearchInput?.set_value("");
+                                this.loadHistory(cx, true);
+                              })),
+                            ),
+                        )
+                        .when(this.branchPickerOpen, bp =>
+                          bp.child(
+                            v_flex()
+                              .id("graph-branch-list")
+                              .mx(4)
+                              .max_h(150)
+                              .overflow_y_scrollbar()
+                              .p(4)
+                              .gap(1)
+                              .rounded(6)
+                              .bg(t.surface)
+                              .border_1()
+                              .border_color(t.border)
+                              .child(
+                                h_flex()
+                                  .id("br-opt-current")
+                                  .h(24)
+                                  .px(6)
+                                  .gap(6)
+                                  .items_center()
+                                  .rounded(4)
+                                  .cursor_pointer()
+                                  .when(!this.graphBranchRef, el => el.bg(t.selected))
+                                  .hover(s => s.bg(t.hover))
+                                  .on_click((_e, cx) => this.selectGraphBranch("", "", cx))
+                                  .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.foreground).child(`Current (${this.branch || "HEAD"})`)),
+                              )
+                              .child(
+                                h_flex()
+                                  .id("br-opt-all")
+                                  .h(24)
+                                  .px(6)
+                                  .gap(6)
+                                  .items_center()
+                                  .rounded(4)
+                                  .cursor_pointer()
+                                  .when(this.graphBranchRef === "__all__", el => el.bg(t.selected))
+                                  .hover(s => s.bg(t.hover))
+                                  .on_click((_e, cx) => this.selectGraphBranch("__all__", "All", cx))
+                                  .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.foreground).child("All branches")),
+                              )
+                              .children(
+                                this.branches.map(br =>
+                                  h_flex()
+                                    .id(`br-opt-${br.fullRef}`)
+                                    .h(24)
+                                    .px(6)
+                                    .gap(6)
+                                    .items_center()
+                                    .rounded(4)
+                                    .cursor_pointer()
+                                    .when(this.graphBranchRef === br.fullRef, el => el.bg(t.selected))
+                                    .hover(s => s.bg(t.hover))
+                                    .on_click((_e, cx) => this.selectGraphBranch(br.fullRef, br.label, cx))
+                                    .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(br.isRemote ? t.muted : t.foreground).child(br.label))
+                                    .when(br.isRemote, el => el.child(div().text_size(9.5).text_color(t.dim).child("remote"))),
+                                ),
+                              ),
+                          ),
+                        )
                         .when(Boolean(this.historyError), e => e.child(div().px(10).py(6).text_size(11.5).text_color(t.ansi1).child(this.historyError)))
                         .when(!this.commits.length && !this.historyError, e =>
-                          e.child(div().px(10).py(6).text_size(11.5).text_color(t.dim).child(this.historyLoading ? "Loading commits…" : "No commits yet")),
+                          e.child(div().px(10).py(6).text_size(11.5).text_color(t.dim).child(this.historyLoading ? "Loading commits…" : this.graphQuery.trim() ? "No matching commits" : "No commits yet")),
                         )
                         .children(
                           this.commits.map(c =>
@@ -1561,7 +2114,7 @@ export default class ChangesHistory extends View {
                               .rounded(6)
                               .cursor_pointer()
                               .hover(s => s.bg(t.hover))
-                              .tooltip(`${c.shortHash} · ${c.subject}\n${c.author} · ${c.relDate}\nCtrl+Click: open in new tab`)
+                              .tooltip(`${c.shortHash} · ${c.subject}\n${c.author} · ${c.date ? `${c.date} (${c.relDate})` : c.relDate}\nCtrl+Click: open in new tab`)
                               .on_click((e, cx) => {
                                 if (e?.modifiers?.control || e?.modifiers?.platform) {
                                   this.openCommitInNewTab(c);
@@ -1572,7 +2125,10 @@ export default class ChangesHistory extends View {
                               .child(div().size(7).flex_none().rounded(999).bg(c.refs.length ? t.ansi2 : t.accent))
                               .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.foreground).child(c.subject))
                               .when(c.refs.length > 0, el =>
-                                el.child(div().px(4).py(0.5).rounded(4).bg(t.ansi2 + "22").text_size(9.5).font_semibold().text_color(t.ansi2).truncate().max_w(75).child(c.refs[0].replace(/^HEAD -> /, ""))),
+                                el.child(div().px(4).py(0.5).rounded(4).bg(t.ansi2 + "22").text_size(9.5).font_semibold().text_color(t.ansi2).truncate().max_w(70).child(c.refs[0].replace(/^HEAD -> /, ""))),
+                              )
+                              .when(Boolean(c.date), el =>
+                                el.child(div().flex_none().text_size(10).text_color(t.muted).child(c.date)),
                               )
                               .child(div().flex_none().text_size(10.5).text_color(t.dim).child(c.shortHash)),
                           ),
@@ -1597,6 +2153,127 @@ export default class ChangesHistory extends View {
                               })
                               .child("Load 50 more commits"),
                           ),
+                        ),
+                    ),
+                  )
+                  .child(
+                    div()
+                      .border_t(1)
+                      .border_color(t.border)
+                      .child(this.sectionHeader(t, "sec-prs", "Pull Requests", this.secPrs, this.prs.length || null, (_e, cx) => {
+                        this.secPrs = !this.secPrs;
+                        if (!this.secPrs) {
+                          this.prs = [];
+                          this.prLoadedFor = null;
+                          this.prError = null;
+                          cx.notify();
+                          return;
+                        }
+                        if (this.prLoadedFor !== this.root && !this.prLoading) {
+                          this.loadPullRequests(cx);
+                        } else {
+                          cx.notify();
+                        }
+                      }, this.secPrs ? [this.actionBtn(t, "sc-pr-ref", "↻", "Refresh pull requests", (_e, cx) => this.loadPullRequests(cx))] : [])),
+                  )
+                  .when(this.secPrs, list =>
+                    list.child(
+                      v_flex()
+                        .px(4)
+                        .pb(6)
+                        .gap(3)
+                        .child(
+                          h_flex()
+                            .id("pr-search-box")
+                            .mx(4)
+                            .mt(2)
+                            .h(26)
+                            .px(7)
+                            .gap(4)
+                            .items_center()
+                            .rounded(6)
+                            .bg(t.surface)
+                            .border_1()
+                            .border_color(t.border)
+                            .cursor_text()
+                            .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+                            .child(Input.new(this.prSearchInput).flex_1().h_full().text_size(11.5).text_color(t.foreground))
+                            .when(Boolean(this.prQuery), clr =>
+                              clr.child(this.actionBtn(t, "pr-search-clear", "×", "Clear PR search", (_e, cx) => {
+                                this.prQuery = "";
+                                this.prSearchInput?.set_value("");
+                                this.loadPullRequests(cx);
+                              })),
+                            ),
+                        )
+                        .child(
+                          h_flex()
+                            .mx(4)
+                            .gap(4)
+                            .items_center()
+                            .children(
+                              [
+                                { id: "open", label: "Open" },
+                                { id: "merged", label: "Merged" },
+                                { id: "closed", label: "Closed" },
+                                { id: "all", label: "All" },
+                              ].map(opt => {
+                                const active = this.prState === opt.id;
+                                return div()
+                                  .id(`pr-state-${opt.id}`)
+                                  .px(7)
+                                  .py(2)
+                                  .rounded(5)
+                                  .bg(active ? t.selected : t.surface)
+                                  .text_size(10.5)
+                                  .when(active, el => el.font_semibold().text_color(t.foreground))
+                                  .when(!active, el => el.text_color(t.muted))
+                                  .cursor_pointer()
+                                  .hover(s => s.bg(active ? t.selected : t.hover).text_color(t.foreground))
+                                  .on_click((_e, cx) => {
+                                    if (this.prState === opt.id) return;
+                                    this.prState = opt.id;
+                                    this.loadPullRequests(cx);
+                                  })
+                                  .child(opt.label);
+                              }),
+                            ),
+                        )
+                        .when(Boolean(this.prError), e => e.child(div().px(10).py(6).text_size(11.5).text_color(t.ansi1).child(this.prError)))
+                        .when(!this.prs.length && !this.prError, e =>
+                          e.child(div().px(10).py(6).text_size(11.5).text_color(t.dim).child(this.prLoading ? "Loading pull requests…" : "No pull requests found")),
+                        )
+                        .children(
+                          this.prs.map(pr => {
+                            const dotColor = prStateColor(pr, t);
+                            const prDate = pr.updatedDate || pr.createdDate || "";
+                            return h_flex()
+                              .id(`pr-row-${pr.number}`)
+                              .h(26)
+                              .px(8)
+                              .gap(6)
+                              .items_center()
+                              .rounded(6)
+                              .cursor_pointer()
+                              .hover(s => s.bg(t.hover))
+                              .tooltip(`#${pr.number} · ${pr.title}\n@${pr.author} · ${prStateLabel(pr)}${prDate ? ` · ${prDate}` : ""}${pr.headRefName ? `\n${pr.headRefName} → ${pr.baseRefName}` : ""}\nClick: inspect PR · Ctrl+Click: open in new tab`)
+                              .on_click((e, cx) => {
+                                if (e?.modifiers?.control || e?.modifiers?.platform) {
+                                  this.openPullRequestInNewTab(pr);
+                                } else {
+                                  this.openPullRequest(pr, cx);
+                                }
+                              })
+                              .child(div().size(7).flex_none().rounded(999).bg(dotColor))
+                              .child(div().flex_none().text_size(10.5).font_semibold().text_color(dotColor).child(`#${pr.number}`))
+                              .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.foreground).child(pr.title))
+                              .when(Boolean(prDate), el =>
+                                el.child(div().flex_none().text_size(10).text_color(t.muted).child(prDate)),
+                              )
+                              .when(Boolean(pr.url), el =>
+                                el.child(this.actionBtn(t, `pr-open-${pr.number}`, "↗", "Open PR in GitHub", (_e, cx) => cx.open_url(pr.url))),
+                              );
+                          }),
                         ),
                     ),
                   ),
