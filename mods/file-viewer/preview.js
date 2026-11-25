@@ -1,4 +1,4 @@
-import { appHome, exec } from "herdr";
+import { appHome, exec, readTextFile, writeTextFile } from "herdr";
 
 const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "webp", "gif", "bmp", "ico", "svg", "avif"]);
 const CSV_EXTS = new Set(["csv", "tsv"]);
@@ -129,11 +129,53 @@ export async function removePreviewFile(relPath) {
   await exec("rm", ["-f", abs], { timeout: 2000 }).catch(() => null);
 }
 
+const SVG_PREVIEW_RES = 1024;
+
+function upscaleSvgForPreview(svgText) {
+  const openTagMatch = /<svg\b[^>]*>/i.exec(svgText);
+  if (!openTagMatch) return { text: svgText, aspect: 1 };
+
+  let tag = openTagMatch[0];
+  const vbMatch = /\bviewBox\s*=\s*["']\s*[\d.-]+[\s,]+[\d.-]+[\s,]+([\d.]+)[\s,]+([\d.]+)\s*["']/i.exec(tag);
+  const wMatch = /\bwidth\s*=\s*["']\s*([\d.]+)(?:px)?\s*["']/i.exec(tag);
+  const hMatch = /\bheight\s*=\s*["']\s*([\d.]+)(?:px)?\s*["']/i.exec(tag);
+
+  let natW = vbMatch ? parseFloat(vbMatch[1]) : (wMatch ? parseFloat(wMatch[1]) : 0);
+  let natH = vbMatch ? parseFloat(vbMatch[2]) : (hMatch ? parseFloat(hMatch[1]) : 0);
+  if (!(natW > 0 && natH > 0)) {
+    natW = 1024;
+    natH = 1024;
+  }
+
+  if (!vbMatch && wMatch && hMatch) {
+    tag = tag.replace(/>$/, ` viewBox="0 0 ${natW} ${natH}">`);
+  }
+
+  const scale = SVG_PREVIEW_RES / Math.max(natW, natH);
+  const outW = Math.max(64, Math.round(natW * scale));
+  const outH = Math.max(64, Math.round(natH * scale));
+
+  tag = tag.replace(/\s+\b(width|height)\s*=\s*["'][^"']*["']/gi, "");
+  tag = tag.replace(/>$/, ` width="${outW}" height="${outH}">`);
+
+  const updated = svgText.slice(0, openTagMatch.index) + tag + svgText.slice(openTagMatch.index + openTagMatch[0].length);
+  return { text: updated, aspect: outW / outH };
+}
+
 export async function stageImagePreview(fullPath, on, token) {
   const ext = getExtension(fullPath) || "png";
   const relPath = `data/fv-preview/img-${token}.${ext}`;
   const dstAbs = `${appHome()}/${relPath}`;
   const dir = previewDir();
+
+  if (ext === "svg") {
+    const rawSvg = await readTextFile(fullPath, { on });
+    if (rawSvg === null) throw new Error("SVG file is no longer available");
+    const { text: hiResSvg, aspect } = upscaleSvgForPreview(rawSvg);
+    await exec("mkdir", ["-p", dir], { timeout: 3000 });
+    await writeTextFile(dstAbs, hiResSvg, null);
+    return { relPath, sizeBytes: rawSvg.length, aspect };
+  }
 
   if (!on) {
     const r = await exec(
@@ -142,7 +184,7 @@ export async function stageImagePreview(fullPath, on, token) {
       { timeout: 4000 },
     );
     if (r.code !== 0) throw new Error(r.stderr || "Cannot preview image");
-    return { relPath, sizeBytes: parseInt((r.stdout || "").trim(), 10) || 0 };
+    return { relPath, sizeBytes: parseInt((r.stdout || "").trim(), 10) || 0, aspect: 1 };
   }
 
   const remote = await exec(
@@ -161,7 +203,7 @@ export async function stageImagePreview(fullPath, on, token) {
     { timeout: 5000 },
   );
   if (local.code !== 0) throw new Error("Failed to decode remote image");
-  return { relPath, sizeBytes: Math.floor((b64.length * 3) / 4) };
+  return { relPath, sizeBytes: Math.floor((b64.length * 3) / 4), aspect: 1 };
 }
 
 export async function inspectPdf(fullPath, on) {

@@ -96,6 +96,7 @@ export default class FileViewer extends View {
 
     this.imageRelPath = null;
     this.imageSizeBytes = 0;
+    this.imageAspect = 1;
     this.csvTable = null;
     this.pdfPages = 0;
     this.pdfPage = 1;
@@ -417,6 +418,7 @@ export default class FileViewer extends View {
           }
           this.imageRelPath = staged.relPath;
           this.imageSizeBytes = staged.sizeBytes;
+          this.imageAspect = staged.aspect || 1;
           return;
         }
 
@@ -483,7 +485,10 @@ export default class FileViewer extends View {
   }
 
   renderImageBody(t, zoomScale) {
-    const imgSize = Math.round(Math.max(180, Math.min(1800, 520 * zoomScale)));
+    const base = Math.round(Math.max(160, Math.min(1800, 460 * zoomScale)));
+    const aspect = Math.max(0.2, Math.min(5, this.imageAspect || 1));
+    const imgW = aspect >= 1 ? base : Math.round(base * aspect);
+    const imgH = aspect >= 1 ? Math.round(base / aspect) : base;
     return v_flex()
       .flex_1()
       .min_h(0)
@@ -499,7 +504,7 @@ export default class FileViewer extends View {
           .border_color(t.border)
           .text_size(11)
           .text_color(t.dim)
-          .child(this.kind === "svg" ? "SVG Preview" : "Image Preview")
+          .child(this.kind === "svg" ? "SVG Preview (1024px vector)" : "Image Preview")
           .when(this.imageSizeBytes > 0, el => el.child(`· ${formatBytes(this.imageSizeBytes)}`))
           .child(div().flex_1())
           .child("Ctrl + wheel to zoom"),
@@ -520,7 +525,7 @@ export default class FileViewer extends View {
               .bg(this.kind === "svg" ? "#e5e7eb" : t.surface)
               .border_1()
               .border_color(t.border)
-              .child(image(this.imageRelPath).w(imgSize).h(imgSize)),
+              .child(image(this.imageRelPath).w(imgW).h(imgH)),
           ),
       );
   }
