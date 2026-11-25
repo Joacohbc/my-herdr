@@ -1,7 +1,7 @@
 // VS Code-style Source Control panel: Commit, Staged/Unstaged Changes, Stashes, and Graph/History.
 import { View, div, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar, v_virtual_list } from "gpui-base";
-import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, window, checking, run, shared, setShared } from "herdr";
+import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, window, checking, run, shared, setShared, props } from "herdr";
 import { fileIcon } from "./material-icons.js";
 
 const scans = globalThis[Symbol.for("herdr.repoStatus.v2")] ??= new Map();
@@ -94,7 +94,8 @@ function statusColor(status, t) {
 
 export default class ChangesHistory extends View {
   init(initialProps, cx) {
-    this.standaloneCommit = Boolean(initialProps?.commit && initialProps?.root);
+    const p = (initialProps && Object.keys(initialProps).length ? initialProps : null) ?? props();
+    this.standaloneCommit = Boolean(p?.commit && p?.root);
     this.branch = "";
     this.staged = [];
     this.unstaged = [];
@@ -141,10 +142,10 @@ export default class ChangesHistory extends View {
 
     if (checking()) return;
     if (this.standaloneCommit) {
-      this.root = initialProps.root;
-      this.on = initialProps.on ?? null;
-      this.context = { key: `commit:${initialProps.commit.hash}`, on: this.on, dirtyAt: 0 };
-      this.openCommit(initialProps.commit, cx);
+      this.root = p.root;
+      this.on = p.on ?? null;
+      this.context = { key: `commit:${p.commit.hash}`, on: this.on, dirtyAt: 0 };
+      this.openCommit(p.commit, cx);
       return;
     }
     this.refresh(cx);
@@ -544,11 +545,18 @@ export default class ChangesHistory extends View {
 
   openCommitInNewTab(commit) {
     if (!commit || !this.root) return;
+    const plainCommit = {
+      hash: commit.hash,
+      shortHash: commit.shortHash,
+      author: commit.author,
+      relDate: commit.relDate,
+      subject: commit.subject,
+    };
     const tabTitle = `${commit.shortHash} ${commit.subject}`.slice(0, 32);
     const res = run("tab.new", {
       name: tabTitle,
       mod: "changes-history",
-      props: { commit, root: this.root, on: this.on ?? null },
+      props: { commit: plainCommit, root: this.root, on: this.on ?? null },
     });
     if (res?.pane) {
       run("pane.rename", { pane: res.pane, name: `${commit.shortHash} · ${commit.subject}` });
