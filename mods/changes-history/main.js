@@ -1,13 +1,26 @@
 import { View, div, image } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input, Scrollbar, v_virtual_list } from "gpui-base";
+import { v_flex, h_flex, InputState, Input, Scrollbar, v_virtual_list, VirtualListScrollHandle } from "gpui-base";
 import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, window, layout, checking, run, shared, setShared, props } from "herdr";
 import { fileIcon, releaseIconCache } from "./material-icons.js";
 import { listPullRequests, loadPullRequestDetail, checkoutPullRequest, buildRemoteBranchUrl } from "./github.js";
+import { SCM_COLORS, DIFF_COLORS, scmColor, parseStatusZ, parseNameStatusZ } from "./scm-status.js";
+import { splitDiff, buildHunkPatch, applyHunk } from "./hunks.js";
+import { stashPushArgs, stashApplyArgs, loadStashFiles, loadStashFileDiff } from "./stash.js";
+import { openInVSCode } from "./vscode.js";
 
-const scans = globalThis[Symbol.for("herdr.changesStatus.v3")] ??= new Map();
+const scans = globalThis[Symbol.for("herdr.changesStatus.v4")] ??= new Map();
 const MAX_SCANS = 4;
 const MAX_DIFF_LINES = 1000;
 const MAX_DIFF_LINE_CHARS = 2000;
+const MAX_UNTRACKED_DIFF_CHARS = 250_000;
+const MAX_BADGE_STATUS_FILES = 999;
+const MAX_COMMIT_FILES = 400;
+const MAX_RULER_BUCKETS = 120;
+const MIN_DIFF_WIDTH_PX = 300;
+const DIFF_ROW_EXTRA_PX = 42;
+const GIT_CHECK_TIMEOUT_MS = 5_000;
+const GIT_READ_TIMEOUT_MS = 8_000;
+const GIT_ACTION_TIMEOUT_MS = 15_000;
 const MAX_HISTORY_LIMIT = 1000;
 const MAX_HISTORY_PAGES = 20;
 const MAX_BRANCHES = 150;
@@ -35,31 +48,6 @@ function isChangesPanelVisible() {
   return !body || body.active === "changes";
 }
 
-function parsePorcelain(stdout) {
-  const entries = (stdout || "").split("\0").filter(Boolean);
-  const shown = entries.slice(0, 1000);
-  const staged = [];
-  const unstaged = [];
-  const uniquePaths = new Set();
-
-  for (const entry of shown) {
-    const x = entry[0], y = entry[1], path = entry.slice(3);
-    if (!path) continue;
-    uniquePaths.add(path);
-    if (x === "?" && y === "?") {
-      unstaged.push({ path, status: "U", untracked: true, staged: false });
-      continue;
-    }
-    if (x !== " " && x !== "?") {
-      staged.push({ path, status: x, untracked: false, staged: true });
-    }
-    if (y !== " " && y !== "?") {
-      unstaged.push({ path, status: y, untracked: false, staged: false });
-    }
-  }
-  return { staged, unstaged, limited: entries.length > 1000, count: uniquePaths.size };
-}
-
 async function repoStatus(root, on, { after, visiting, urgent, allowInactive }, cx, current) {
   const repo = JSON.stringify([on, root]), now = Date.now();
   for (const [k, scan] of scans) {
@@ -81,9 +69,9 @@ async function repoStatus(root, on, { after, visiting, urgent, allowInactive }, 
         if (!allowInactive && window()?.active === false) return;
         next.started = Date.now();
         try {
-          const r = await exec("git", ["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"], { cwd: root, on });
+          const r = await exec("git", ["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain=v1", "-z", "--untracked-files=all"], { cwd: root, on });
           next.ok = r.code === 0;
-          if (next.ok) next.parsed = parsePorcelain(r.stdout);
+          if (next.ok) next.parsed = parseStatusZ(r.stdout);
           else next.stderr = r.stderr;
         } catch (error) {
           next.error = error;
@@ -138,24 +126,99 @@ function displayColumns(text) {
 const rowHeight = size => Math.ceil(size * 1.8), charWidth = size => size * 0.64;
 const untab = (text) => text.replace(/[^\t]*\t/g, (s) => s.slice(0, -1).padEnd((s.length - 1) - (s.length - 1) % 4 + 4));
 
+function truncateDiffLine(line) {
+  return line.length > MAX_DIFF_LINE_CHARS ? `${line.slice(0, MAX_DIFF_LINE_CHARS)}…` : line;
+}
+
 function diffRows(lines) {
-  let old = 0, next = 0;
-  return lines.map((line) => {
+  let old = 0, next = 0, hunkIndex = -1;
+  return lines.map((rawLine) => {
+    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
     const match = /^@@ -(\d+)(?:,\d+)? \+(\d+)/.exec(line);
-    if (match) { old = +match[1]; next = +match[2]; return { kind: "@", text: line }; }
+    if (match) { old = +match[1]; next = +match[2]; hunkIndex += 1; return { kind: "@", text: line, hunk: hunkIndex }; }
     const kind = line[0];
-    if (kind === "-") return { kind, number: old++, text: untab(line.slice(1)) || " " };
-    if (kind === "+") return { kind, number: next++, text: untab(line.slice(1)) || " " };
-    if (kind === " ") { old++; return { kind, number: next++, text: untab(line.slice(1)) || " " }; }
-    return { kind: "", text: line };
+    if (kind === "-") return { kind, number: old++, text: untab(line.slice(1)) || " ", hunk: hunkIndex };
+    if (kind === "+") return { kind, number: next++, text: untab(line.slice(1)) || " ", hunk: hunkIndex };
+    if (kind === " ") { old++; return { kind, number: next++, text: untab(line.slice(1)) || " ", hunk: hunkIndex }; }
+    return { kind: "", text: line, hunk: hunkIndex };
   });
 }
 
-function statusColor(status, t) {
-  if (status === "A" || status === "U") return t.ansi2;
-  if (status === "D") return t.ansi1;
-  if (status === "R") return t.ansi4;
-  return t.blocked;
+function computeOverviewBuckets(rows) {
+  if (!rows.length) return [];
+  const bucketCount = Math.min(MAX_RULER_BUCKETS, rows.length);
+  const buckets = [];
+  let hasAnyChange = false;
+  for (let b = 0; b < bucketCount; b++) {
+    const start = Math.floor((b * rows.length) / bucketCount);
+    const end = Math.max(start + 1, Math.floor(((b + 1) * rows.length) / bucketCount));
+    let hasAdd = false;
+    let hasDel = false;
+    for (let i = start; i < end; i++) {
+      const kind = rows[i]?.kind;
+      if (kind === "+") hasAdd = true;
+      else if (kind === "-") hasDel = true;
+    }
+    if (hasAdd || hasDel) hasAnyChange = true;
+    buckets.push({ hasAdd, hasDel });
+  }
+  return hasAnyChange ? buckets : [];
+}
+
+function parseDiffOutput(stdout) {
+  const raw = stdout || "";
+  if (!raw.trim()) return { lines: ["No changes"], parsed: null };
+  const parsed = splitDiff(raw);
+  if (parsed.binary || !parsed.hunks.length) {
+    return { lines: ["Binary file or empty diff"], parsed: null };
+  }
+  const boundedHunks = [];
+  const lines = [];
+  for (const hunk of parsed.hunks) {
+    if (hunk.bodyStart >= MAX_DIFF_LINES) break;
+    const isTruncated = hunk.bodyEnd > MAX_DIFF_LINES;
+    boundedHunks.push(isTruncated ? { ...hunk, lines: [], truncated: true } : { ...hunk, truncated: false });
+    if (lines.length < MAX_DIFF_LINES) lines.push(truncateDiffLine(hunk.header));
+    for (const bodyLine of hunk.lines) {
+      if (lines.length >= MAX_DIFF_LINES) break;
+      lines.push(truncateDiffLine(bodyLine));
+    }
+  }
+  return {
+    lines: lines.length ? lines : ["Binary file or empty diff"],
+    parsed: { header: parsed.header, hunks: boundedHunks, binary: false },
+  };
+}
+
+async function loadUntrackedDiffLines(root, path, on) {
+  const text = await readTextFile(`${root}/${path}`, { on }).catch(() => null);
+  if (text === null) return ["Cannot preview this file"];
+  if (text.includes("\0")) return ["Binary file · no text diff"];
+  const count = countLines(text);
+  const rawLines = text.slice(0, MAX_UNTRACKED_DIFF_CHARS).replace(/\n$/, "").split("\n").slice(0, MAX_DIFF_LINES);
+  return [`@@ -0,0 +1,${count} @@`, ...rawLines.map(l => truncateDiffLine(`+${l}`))];
+}
+
+async function fetchFileDiff(root, file, on) {
+  if (file.untracked) {
+    return { lines: await loadUntrackedDiffLines(root, file.path, on), parsed: null };
+  }
+  const pathArgs = file.staged && file.origPath ? [file.origPath, file.path] : [file.path];
+  const args = file.staged
+    ? [...READ, "diff", "--cached", "--no-ext-diff", "--no-textconv", "--no-color", "--", ...pathArgs]
+    : [...READ, "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--", ...pathArgs];
+  const r = await exec("git", args, { cwd: root, on, timeout: GIT_READ_TIMEOUT_MS });
+  if (r.code !== 0) throw new Error(r.stderr || "Cannot load diff");
+  return parseDiffOutput(r.stdout);
+}
+
+function buildCommitCommands(mode, message, hasStaged) {
+  if (mode === "amend") {
+    return [message ? ["commit", "--amend", "-m", message] : ["commit", "--amend", "--no-edit"]];
+  }
+  if (mode === "staged") return [["commit", "-m", message]];
+  const base = hasStaged ? [["commit", "-m", message]] : [["add", "-A"], ["commit", "-m", message]];
+  return mode === "push" ? [...base, ["push"]] : base;
 }
 
 function prStateColor(pr, t) {
@@ -184,19 +247,35 @@ export default class ChangesHistory extends View {
     this.remoteBranchUrl = null;
     this.staged = [];
     this.unstaged = [];
+    this.conflicts = [];
     this.stashes = [];
     this.open = null;
     this.rows = [];
+    this.overviewBuckets = [];
+    this.diffParsed = null;
+    this.selectedHunk = 0;
+    this.hunkBusy = false;
+    this.diffSeq = 0;
+    this.actionOpSeq = 0;
+    this.hunkOpSeq = 0;
+    this.rulerHeights = {};
+    this.diffScroll = VirtualListScrollHandle.new();
+    this.commitDiffScroll = VirtualListScrollHandle.new();
+    this.prDiffScroll = VirtualListScrollHandle.new();
     this.longest = 0;
     this.gutterChars = 4;
     this.message = "";
     this.handle = cx.focus_handle();
 
+    this.secMerge = true;
     this.secStaged = true;
     this.secChanges = true;
     this.secStashes = false;
     this.secGraph = false;
     this.secPrs = false;
+    this.stashMenuOpen = false;
+    this.commitMenuOpen = false;
+    this.stashKeepIndex = localStorage.getItem("sc.stashIndex") === "1";
     this.hoveredRow = null;
     this.pendingConfirm = null;
     const savedH = Number(localStorage.getItem("sc.bottomH"));
@@ -222,6 +301,7 @@ export default class ChangesHistory extends View {
     this.commitFiles = [];
     this.commitOpenFile = null;
     this.commitRows = [];
+    this.commitOverviewBuckets = [];
     this.commitLongest = 0;
     this.commitGutterChars = 4;
     this.commitDetailLoading = false;
@@ -238,6 +318,7 @@ export default class ChangesHistory extends View {
     this.prOpenFile = null;
     this.prDiffByFile = new Map();
     this.prRows = [];
+    this.prOverviewBuckets = [];
     this.prLongest = 0;
     this.prGutterChars = 4;
     this.prDetailLoading = false;
@@ -248,6 +329,7 @@ export default class ChangesHistory extends View {
     this.hibernated = false;
     this.lastGcSeq = shared("herdr.gc")?.seq ?? 0;
     this.lastDiffOpenSeq = shared("changes.diff.open")?.seq ?? 0;
+    this.lastChangesRefreshSeq = shared("changes.refresh")?.seq ?? 0;
     this.lastBadgeAt = 0;
     this.lastBadgeLoc = "";
     this.badgeChecking = false;
@@ -321,6 +403,9 @@ export default class ChangesHistory extends View {
   close() {
     this.context?.watch?.pending?.cancel();
     this.evictCaches();
+    this.diffScroll?.release();
+    this.commitDiffScroll?.release();
+    this.prDiffScroll?.release();
     this.input?.release();
     this.graphSearchInput?.release();
     this.prSearchInput?.release();
@@ -349,21 +434,16 @@ export default class ChangesHistory extends View {
       try {
         const r = await exec(
           "git",
-          [...READ, "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"],
-          { cwd: loc.cwd, on: loc.on, timeout: 5000 },
+          [...READ, "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+          { cwd: loc.cwd, on: loc.on, timeout: GIT_CHECK_TIMEOUT_MS },
         );
         if (r.code !== 0) {
           this.publishBadgeCount(0, loc.space);
           return;
         }
-        const unique = new Set();
-        for (const entry of (r.stdout || "").split("\0")) {
-          if (entry.length > 3) unique.add(entry.slice(3));
-          if (unique.size >= 999) break;
-        }
-        this.publishBadgeCount(unique.size, loc.space);
+        const { count } = parseStatusZ(r.stdout, MAX_BADGE_STATUS_FILES);
+        this.publishBadgeCount(count, loc.space);
       } catch {
-        // Ignore transient errors while hidden
       } finally {
         this.badgeChecking = false;
       }
@@ -373,6 +453,13 @@ export default class ChangesHistory extends View {
   evictCaches() {
     this.context?.watch?.pending?.cancel();
     if (this.context) this.context.watch = null;
+    this.staged = [];
+    this.unstaged = [];
+    this.conflicts = [];
+    this.stashes = [];
+    this.pendingConfirm = null;
+    this.stashMenuOpen = false;
+    this.commitMenuOpen = false;
     this.open = null;
     this.setLines([]);
     this.commits = [];
@@ -425,7 +512,7 @@ export default class ChangesHistory extends View {
     return Boolean(me && me.tab === activeTabId);
   }
 
-  checkSharedDiffOpen(cx) {
+  checkSharedDiffOpen(cx, fromRender = false) {
     if (!this.standaloneFileDiff) return;
     const req = shared("changes.diff.open");
     if (!req || !req.seq || req.seq === this.lastDiffOpenSeq) return;
@@ -437,11 +524,14 @@ export default class ChangesHistory extends View {
     this.on = req.on ?? null;
     this.context = { key: JSON.stringify({ cwd: this.root, on: this.on }), cwd: this.root, on: this.on };
     this.standaloneRenamedFor = null;
+    this.pendingConfirm = null;
+    this.hunkOpSeq += 1;
+    this.hunkBusy = false;
     this.hibernated = false;
-    this.loadStandaloneFileDiff(cx);
+    this.loadStandaloneFileDiff(cx, fromRender);
   }
 
-  checkStandaloneHibernation(cx) {
+  checkStandaloneHibernation(cx, fromRender = false) {
     const gcSeq = shared("herdr.gc")?.seq ?? 0;
     const forceGc = gcSeq !== this.lastGcSeq;
     this.lastGcSeq = gcSeq;
@@ -450,9 +540,9 @@ export default class ChangesHistory extends View {
       this.hiddenSince = 0;
       if (this.hibernated) {
         this.hibernated = false;
-        if (this.standaloneCommit && this.selectedCommit) this.openCommit(this.selectedCommit, cx);
-        else if (this.standaloneFileDiff && this.standaloneFile) this.loadStandaloneFileDiff(cx);
-        else if (this.standalonePr && this.selectedPr) this.openPullRequest(this.selectedPr, cx);
+        if (this.standaloneCommit && this.selectedCommit) this.openCommit(this.selectedCommit, cx, fromRender);
+        else if (this.standaloneFileDiff && this.standaloneFile) this.loadStandaloneFileDiff(cx, fromRender);
+        else if (this.standalonePr && this.selectedPr) this.openPullRequest(this.selectedPr, cx, fromRender);
       }
       return;
     }
@@ -462,6 +552,7 @@ export default class ChangesHistory extends View {
     if (forceGc || now - this.hiddenSince >= HIBERNATE_IDLE_MS) {
       if (!this.hibernated) {
         this.hibernated = true;
+        this.pendingConfirm = null;
         this.commitFiles = [];
         this.setCommitLines([]);
         this.prFiles = [];
@@ -469,15 +560,29 @@ export default class ChangesHistory extends View {
         this.setPrLines([]);
         this.setLines([]);
         releaseIconCache();
-        cx.notify();
+        if (!fromRender) cx.notify();
       }
     }
+  }
+
+  consumeChangesRefresh() {
+    const refresh = shared("changes.refresh");
+    const refreshSeq = refresh?.seq ?? 0;
+    if (refreshSeq === this.lastChangesRefreshSeq) return false;
+    this.lastChangesRefreshSeq = refreshSeq;
+    if (refresh?.root) {
+      for (const cacheKey of scans.keys()) {
+        if (cacheKey.includes(JSON.stringify(refresh.root))) scans.delete(cacheKey);
+      }
+    }
+    return !refresh?.root || !this.root || refresh.root === this.root;
   }
 
   refreshIfDue(cx) {
     const gcSeq = shared("herdr.gc")?.seq ?? 0;
     const forceGc = gcSeq !== this.lastGcSeq;
     this.lastGcSeq = gcSeq;
+    const needSync = this.consumeChangesRefresh();
 
     const visible = isChangesPanelVisible();
     if (!visible) {
@@ -487,6 +592,10 @@ export default class ChangesHistory extends View {
       if (!this.hiddenSince) this.hiddenSince = now;
       if (forceGc || (!this.evicted && now - this.hiddenSince >= IDLE_CLEAN_MS)) {
         this.evictCaches();
+      }
+      if (needSync) {
+        this.lastBadgeAt = 0;
+        if (this.context) this.context.dirtyAt = now + 1;
       }
       this.refreshBadgeCount(cx);
       return;
@@ -499,12 +608,12 @@ export default class ChangesHistory extends View {
     const active = window()?.active !== false, context = this.context;
     const refocused = active && this.windowActive === false;
     this.windowActive = active;
-    if (!context || wasEvicted) {
+    if (!context || wasEvicted || needSync) {
       this.refresh(cx, true);
       return;
     }
     if (refocused && (context.dirtyAt || !context.watch)) context.catchUp = true;
-    if (!active || this.loading || this.busy) return;
+    if (!active || this.loading || this.busy || this.hunkBusy) return;
     const now = Date.now();
     if (context.catchUp || (context.dirtyAt && now >= context.watchAt) || now >= context.pollAt) this.refresh(cx);
   }
@@ -578,6 +687,7 @@ export default class ChangesHistory extends View {
       this.remoteBranchUrl = null;
       this.staged = [];
       this.unstaged = [];
+      this.conflicts = [];
       this.stashes = [];
       this.open = null;
       this.setLines([]);
@@ -585,6 +695,13 @@ export default class ChangesHistory extends View {
       this.input.set_value("");
       this.error = null;
       this.note = null;
+      this.pendingConfirm = null;
+      this.stashMenuOpen = false;
+      this.commitMenuOpen = false;
+      this.busy = false;
+      this.hunkBusy = false;
+      this.actionOpSeq += 1;
+      this.hunkOpSeq += 1;
       this.limited = false;
       this.loading = false;
       this.resetHistory();
@@ -597,7 +714,7 @@ export default class ChangesHistory extends View {
       context.pollAt = now + 10000;
       return;
     }
-    if (this.loading || this.busy) return;
+    if (this.loading || this.busy || this.hunkBusy) return;
     if (force || (context.catchUp && !context.dirtyAt)) context.dirtyAt = now + 1;
     const request = {
       after: visiting ? now + 1 : context.dirtyAt || (context.lastStatus ?? -1) + 1,
@@ -619,6 +736,7 @@ export default class ChangesHistory extends View {
           this.remoteBranchUrl = null;
           this.staged = [];
           this.unstaged = [];
+          this.conflicts = [];
           this.stashes = [];
           this.setLines([]);
           this.open = null;
@@ -674,7 +792,7 @@ export default class ChangesHistory extends View {
         if (!scan.ok) throw new Error(scan.stderr || "git status failed");
         if (request.urgent && request.after > started) context.catchUp = true;
 
-        const { staged, unstaged, limited, count } = scan.parsed;
+        const { staged, unstaged, conflicts, limited, count } = scan.parsed;
 
         const stashes = [];
         if (stashRes.code === 0) {
@@ -692,14 +810,17 @@ export default class ChangesHistory extends View {
         this.remoteBranchUrl = remoteBranchUrl;
         this.staged = staged;
         this.unstaged = unstaged;
+        this.conflicts = conflicts;
         this.stashes = stashes;
         this.limited = limited;
         this.error = null;
         this.publishBadgeCount(count, location().space);
 
         if (this.open) {
-          const list = this.open.staged ? staged : unstaged;
-          if (!list.some(f => f.path === this.open.path)) {
+          const exists = this.open.staged
+            ? staged.some(f => f.path === this.open.path)
+            : unstaged.some(f => f.path === this.open.path) || conflicts.some(f => f.path === this.open.path);
+          if (!exists) {
             this.open = null;
             this.setLines([]);
           } else {
@@ -723,13 +844,14 @@ export default class ChangesHistory extends View {
   }
 
   runGitAction(args, cx, successNote = null) {
-    if (!this.root || this.busy) return;
+    if (!this.root || this.busy || this.hunkBusy) return;
     const root = this.root, on = this.on, context = this.context;
+    const opSeq = ++this.actionOpSeq;
     this.busy = true;
     this.note = null;
     cx.spawn(async cx => {
       try {
-        const r = await exec("git", args, { cwd: root, on, timeout: 15000 });
+        const r = await exec("git", args, { cwd: root, on, timeout: GIT_ACTION_TIMEOUT_MS });
         if (!this.current(context)) return;
         if (r.code !== 0) {
           this.note = (r.stderr || r.stdout || "Git command failed").trim();
@@ -740,8 +862,8 @@ export default class ChangesHistory extends View {
       } catch (e) {
         if (this.current(context)) this.note = String(e.message || e);
       } finally {
+        if (this.actionOpSeq === opSeq) this.busy = false;
         if (this.current(context)) {
-          this.busy = false;
           this.refresh(cx, true);
           cx.notify();
         }
@@ -751,7 +873,12 @@ export default class ChangesHistory extends View {
   }
 
   stageFile(path, cx) { this.runGitAction(["add", "--", path], cx); }
-  unstageFile(path, cx) { this.runGitAction(["reset", "HEAD", "--", path], cx); }
+  unstageFile(file, cx) {
+    const pathArgs = typeof file === "string"
+      ? [file]
+      : (file.origPath ? [file.origPath, file.path] : [file.path]);
+    this.runGitAction(["reset", "HEAD", "--", ...pathArgs], cx);
+  }
   stageAll(cx) { this.runGitAction(["add", "-A"], cx); }
   unstageAll(cx) { this.runGitAction(["reset", "HEAD"], cx); }
 
@@ -765,14 +892,31 @@ export default class ChangesHistory extends View {
     cx.notify();
   }
 
+  requestRevertHunk(index, cx) {
+    this.pendingConfirm = { kind: "revert-hunk", index };
+    cx.notify();
+  }
+
+  requestClearStashes(cx) {
+    if (!this.stashes.length) return;
+    this.pendingConfirm = { kind: "clear-stashes" };
+    cx.notify();
+  }
+
   confirmPendingAction(cx) {
-    const req = this.pendingConfirm;
-    if (!req) return;
+    const confirmRequest = this.pendingConfirm;
+    if (!confirmRequest) return;
     this.pendingConfirm = null;
-    if (req.kind === "discard") {
-      this.discardFile(req.file, cx);
-    } else if (req.kind === "drop-stash") {
-      this.stashDrop(req.stash.ref, cx);
+    if (confirmRequest.kind === "discard") {
+      this.discardFile(confirmRequest.file, cx);
+    } else if (confirmRequest.kind === "drop-stash") {
+      this.stashDrop(confirmRequest.stash.ref, cx);
+    } else if (confirmRequest.kind === "revert-hunk") {
+      this.runHunkAction(confirmRequest.index, "revert", cx);
+    } else if (confirmRequest.kind === "clear-stashes") {
+      this.runGitAction(["stash", "clear"], cx);
+    } else if (confirmRequest.kind === "amend-pushed") {
+      this.executeCommit("amend", cx);
     }
   }
 
@@ -784,9 +928,15 @@ export default class ChangesHistory extends View {
     }
   }
 
-  stashPush(cx) {
+  stashPush(cx, mode = "all", paths = []) {
+    const wasOpen = this.stashMenuOpen;
+    this.stashMenuOpen = false;
+    if (!this.root || this.busy || this.hunkBusy) {
+      if (wasOpen) cx.notify();
+      return;
+    }
     const msg = this.message.trim();
-    const args = msg ? ["stash", "push", "-u", "-m", msg] : ["stash", "push", "-u"];
+    const args = stashPushArgs({ mode, message: msg, paths });
     if (msg) {
       this.message = "";
       this.input.set_value("");
@@ -795,9 +945,104 @@ export default class ChangesHistory extends View {
     this.runGitAction(args, cx);
   }
 
-  stashApply(ref, cx) { this.runGitAction(["stash", "apply", ref], cx); }
-  stashPop(ref, cx) { this.runGitAction(["stash", "pop", ref], cx); }
+  stashApply(ref, cx) {
+    this.runGitAction(stashApplyArgs(ref, { pop: false, keepIndex: this.stashKeepIndex }), cx);
+  }
+
+  stashPop(ref, cx) {
+    this.runGitAction(stashApplyArgs(ref, { pop: true, keepIndex: this.stashKeepIndex }), cx);
+  }
+
   stashDrop(ref, cx) { this.runGitAction(["stash", "drop", ref], cx); }
+
+  notifyChangesRefresh(root) {
+    const prevSeq = shared("changes.refresh")?.seq ?? 0;
+    setShared("changes.refresh", { seq: prevSeq + 1, root });
+  }
+
+  async finishHunkAction(opSeq, context, root, cx) {
+    if (this.hunkOpSeq === opSeq) this.hunkBusy = false;
+    if (!this.current(context)) return;
+    if (this.standaloneFileDiff) {
+      this.loadStandaloneFileDiff(cx);
+      this.notifyChangesRefresh(root);
+      cx.notify();
+      return;
+    }
+    if (this.open) await this.loadDiff(this.open, context).catch(() => {});
+    this.refresh(cx, true);
+    cx.notify();
+  }
+
+  runHunkAction(index, mode, cx) {
+    if (this.busy || this.hunkBusy || !this.root || !this.diffParsed) return;
+    const hunk = this.diffParsed.hunks[index];
+    if (!hunk || hunk.truncated) return;
+    const patch = buildHunkPatch(this.diffParsed.header, hunk);
+    const context = this.context, root = this.root, on = this.on;
+    const opSeq = ++this.hunkOpSeq;
+    this.hunkBusy = true;
+    this.note = null;
+    cx.spawn(async cx => {
+      try {
+        const hunkResult = await applyHunk(exec, { root, on, patch, mode });
+        if (this.current(context) && !hunkResult.ok) this.note = hunkResult.error;
+      } catch (e) {
+        if (this.current(context)) this.note = String(e.message || e);
+      } finally {
+        await this.finishHunkAction(opSeq, context, root, cx);
+      }
+    });
+    cx.notify();
+  }
+
+  runStandaloneFileAction(stage, cx) {
+    const file = this.standaloneFile;
+    if (!file || !this.root || this.busy || this.hunkBusy) return;
+    const context = this.context, root = this.root, on = this.on;
+    const opSeq = ++this.hunkOpSeq;
+    const pathArgs = !stage && file.origPath ? [file.origPath, file.path] : [file.path];
+    const args = stage ? ["add", "--", ...pathArgs] : ["reset", "HEAD", "--", ...pathArgs];
+    this.hunkBusy = true;
+    this.note = null;
+    cx.spawn(async cx => {
+      try {
+        const r = await exec("git", args, { cwd: root, on, timeout: GIT_ACTION_TIMEOUT_MS });
+        if (this.current(context) && r.code !== 0) {
+          this.note = (r.stderr || r.stdout || "Git command failed").trim();
+        }
+      } catch (e) {
+        if (this.current(context)) this.note = String(e.message || e);
+      } finally {
+        await this.finishHunkAction(opSeq, context, root, cx);
+      }
+    });
+    cx.notify();
+  }
+
+  toggleStandaloneStaged(cx) {
+    if (!this.standaloneFile) return;
+    this.standaloneFile = { ...this.standaloneFile, staged: !this.standaloneFile.staged };
+    this.standaloneRenamedFor = null;
+    this.pendingConfirm = null;
+    if (this.standalonePaneId) {
+      const wantName = `${this.standaloneFile.staged ? "Staged · " : "Diff · "}${this.standaloneFile.path}`;
+      this.standaloneRenamedFor = wantName;
+      run("pane.rename", { pane: this.standalonePaneId, name: wantName });
+    }
+    this.loadStandaloneFileDiff(cx);
+  }
+
+  launchVSCode(filePath, cx) {
+    if (!this.root) return;
+    const context = this.context, root = this.root, on = this.on;
+    cx.spawn(async cx => {
+      const launchResult = await openInVSCode(exec, { root, on, file: filePath });
+      if (!this.current(context) || launchResult.ok) return;
+      this.note = launchResult.error || "Failed to launch VS Code";
+      cx.notify();
+    });
+  }
 
   openInViewer(path, event) {
     if (!path || !this.root) return;
@@ -833,32 +1078,14 @@ export default class ChangesHistory extends View {
 
   async loadDiff(target, context) {
     const root = this.root, on = this.on;
-    const list = target.staged ? this.staged : this.unstaged;
+    const list = target.staged ? this.staged : [...this.unstaged, ...this.conflicts];
     const file = list.find(f => f.path === target.path);
     if (!file) return;
-
-    let lines;
-    if (file.untracked) {
-      const text = await readTextFile(`${root}/${file.path}`, { on }).catch(() => null);
-      if (text === null) lines = ["Cannot preview this file"];
-      else if (text.includes("\0")) lines = ["Binary file · no text diff"];
-      else {
-        const count = countLines(text);
-        lines = [`@@ -0,0 +1,${count} @@`, ...text.slice(0, 250000).replace(/\n$/, "").split("\n").slice(0, MAX_DIFF_LINES).map(l => `+${l}`)];
-      }
-    } else {
-      const args = target.staged
-        ? [...READ, "diff", "--cached", "--no-ext-diff", "--no-textconv", "--no-color", "--", file.path]
-        : [...READ, "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--", file.path];
-      const r = await exec("git", args, { cwd: root, on });
-      if (r.code !== 0) throw new Error(r.stderr);
-      const all = (r.stdout || "").replace(/\n$/, "").split("\n");
-      const first = all.findIndex(l => l.startsWith("@@"));
-      lines = first < 0 ? ["Binary file or empty diff"] : all.slice(first);
-    }
-
+    const seq = ++this.diffSeq;
+    const { lines, parsed } = await fetchFileDiff(root, file, on);
+    if (seq !== this.diffSeq) return;
     if (this.current(context) && this.open?.path === target.path && this.open?.staged === target.staged) {
-      this.setLines(lines.slice(0, MAX_DIFF_LINES).map(l => l.length > MAX_DIFF_LINE_CHARS ? l.slice(0, MAX_DIFF_LINE_CHARS) + "…" : l));
+      this.setLines(lines, parsed);
     }
   }
 
@@ -866,8 +1093,10 @@ export default class ChangesHistory extends View {
     if (!file || !this.root) return;
     const plainFile = {
       path: file.path,
+      origPath: file.origPath || "",
       staged: Boolean(file.staged),
       untracked: Boolean(file.untracked),
+      conflict: Boolean(file.conflict),
       status: file.status || "M",
     };
     const fileName = file.path.split("/").pop() || file.path;
@@ -915,46 +1144,52 @@ export default class ChangesHistory extends View {
     this.openFileDiff(file, true);
   }
 
-  loadStandaloneFileDiff(cx) {
+  async refreshStandaloneFileState(file, root, on) {
+    const statusArgs = [...READ, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", ...(file.origPath ? [file.origPath, file.path] : [file.path])];
+    const r = await exec("git", statusArgs, { cwd: root, on, timeout: GIT_CHECK_TIMEOUT_MS }).catch(() => null);
+    if (!r || r.code !== 0) return file;
+    const parsed = parseStatusZ(r.stdout, 20);
+    const match = file.staged
+      ? parsed.staged.find(f => f.path === file.path)
+      : (parsed.conflicts.find(f => f.path === file.path) ?? parsed.unstaged.find(f => f.path === file.path));
+    if (!match) {
+      return { ...file, untracked: false, conflict: false };
+    }
+    return {
+      ...file,
+      origPath: match.origPath || file.origPath || "",
+      status: match.status,
+      untracked: Boolean(match.untracked),
+      conflict: Boolean(match.conflict),
+    };
+  }
+
+  loadStandaloneFileDiff(cx, fromRender = false) {
     const file = this.standaloneFile;
     if (!file || !this.root) return;
     const context = this.context, root = this.root, on = this.on;
+    const seq = ++this.diffSeq;
     this.loading = true;
     this.setLines([]);
     cx.spawn(async cx => {
       try {
-        let lines;
-        if (file.untracked) {
-          const text = await readTextFile(`${root}/${file.path}`, { on }).catch(() => null);
-          if (text === null) lines = ["Cannot preview this file"];
-          else if (text.includes("\0")) lines = ["Binary file · no text diff"];
-          else {
-            const count = countLines(text);
-            lines = [`@@ -0,0 +1,${count} @@`, ...text.slice(0, 250000).replace(/\n$/, "").split("\n").slice(0, MAX_DIFF_LINES).map(l => `+${l}`)];
-          }
-        } else {
-          const args = file.staged
-            ? [...READ, "diff", "--cached", "--no-ext-diff", "--no-textconv", "--no-color", "--", file.path]
-            : [...READ, "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--", file.path];
-          const r = await exec("git", args, { cwd: root, on, timeout: 8000 });
-          if (r.code !== 0) throw new Error(r.stderr || "Cannot load diff");
-          const all = (r.stdout || "").replace(/\n$/, "").split("\n");
-          const first = all.findIndex(l => l.startsWith("@@"));
-          lines = first < 0 ? ["Binary file or empty diff"] : all.slice(first);
-        }
-        if (this.current(context)) {
-          this.setLines(lines.slice(0, MAX_DIFF_LINES).map(l => l.length > MAX_DIFF_LINE_CHARS ? l.slice(0, MAX_DIFF_LINE_CHARS) + "…" : l));
+        const freshFile = await this.refreshStandaloneFileState(file, root, on);
+        if (!this.current(context) || seq !== this.diffSeq) return;
+        this.standaloneFile = freshFile;
+        const { lines, parsed } = await fetchFileDiff(root, freshFile, on);
+        if (this.current(context) && seq === this.diffSeq) {
+          this.setLines(lines, parsed);
         }
       } catch (e) {
-        if (this.current(context)) this.setLines([`Diff error: ${e}`]);
+        if (this.current(context) && seq === this.diffSeq) this.setLines([`Diff error: ${e}`]);
       } finally {
-        if (this.current(context)) {
+        if (this.current(context) && seq === this.diffSeq) {
           this.loading = false;
           cx.notify();
         }
       }
     });
-    cx.notify();
+    if (!fromRender) cx.notify();
   }
 
   pickDiff(file, cx) {
@@ -973,26 +1208,102 @@ export default class ChangesHistory extends View {
     cx.notify();
   }
 
-  commit(cx) {
-    if (!this.message.trim() || !this.root || this.busy || this.loading || this.context?.key !== key()) return;
+  commit(cx, mode = "smart") {
+    const wasMenuOpen = this.commitMenuOpen;
+    this.commitMenuOpen = false;
+    if (!this.root || this.busy || this.hunkBusy || this.loading || this.context?.key !== key()) {
+      if (wasMenuOpen) cx.notify();
+      return;
+    }
+    if (this.conflicts.length > 0) {
+      this.note = "Resolve merge conflicts before committing";
+      cx.notify();
+      return;
+    }
+    if (mode === "staged" && this.staged.length === 0) {
+      this.note = "Nothing staged";
+      cx.notify();
+      return;
+    }
+    if (mode !== "amend" && !this.message.trim()) {
+      if (wasMenuOpen) cx.notify();
+      return;
+    }
+    if (mode === "amend") {
+      this.prepareAmend(cx);
+      return;
+    }
+    this.executeCommit(mode, cx);
+  }
+
+  prepareAmend(cx) {
+    if (this.staged.length === 0 && !this.message.trim()) {
+      this.note = "Nothing staged and no new message to amend";
+      cx.notify();
+      return;
+    }
+    const context = this.context, root = this.root, on = this.on;
+    const opSeq = ++this.actionOpSeq;
+    this.busy = true;
+    this.note = null;
+    cx.spawn(async cx => {
+      try {
+        const headCheck = await exec("git", [...READ, "rev-parse", "--verify", "HEAD"], { cwd: root, on, timeout: GIT_CHECK_TIMEOUT_MS }).catch(() => ({ code: 1 }));
+        if (!this.current(context)) return;
+        if (headCheck.code !== 0) {
+          this.note = "No commits to amend yet";
+          return;
+        }
+        const ancestorCheck = await exec("git", [...READ, "merge-base", "--is-ancestor", "HEAD", "@{u}"], { cwd: root, on, timeout: GIT_CHECK_TIMEOUT_MS }).catch(() => ({ code: 1 }));
+        if (!this.current(context)) return;
+        if (ancestorCheck.code === 0) {
+          this.pendingConfirm = { kind: "amend-pushed" };
+          return;
+        }
+        if (this.actionOpSeq === opSeq) this.busy = false;
+        this.executeCommit("amend", cx);
+      } finally {
+        if (this.actionOpSeq === opSeq) this.busy = false;
+        if (this.current(context)) cx.notify();
+      }
+    });
+    cx.notify();
+  }
+
+  executeCommit(mode, cx) {
+    if (!this.root || this.busy || this.hunkBusy || this.conflicts.length > 0) return;
     const root = this.root, on = this.on, context = this.context, message = this.message.trim();
-    const hasStaged = this.staged.length > 0;
+    const cmds = buildCommitCommands(mode, message, this.staged.length > 0);
+    const opSeq = ++this.actionOpSeq;
     this.busy = true;
     this.note = null;
     cx.spawn(async (cx) => {
+      let committed = false;
       try {
-        const cmds = hasStaged ? [["commit", "-m", message]] : [["add", "-A"], ["commit", "-m", message]];
         for (const args of cmds) {
-          const r = await exec("git", args, { cwd: root, on });
+          const timeout = args[0] === "push" ? GIT_ACTION_TIMEOUT_MS : undefined;
+          const r = await exec("git", args, { cwd: root, on, timeout });
           if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
+          if (args[0] === "commit") committed = true;
         }
+      } catch (e) {
         if (this.current(context)) {
-          this.message = "";
-          this.input.set_value("");
-          this.historyLoadedFor = null;
+          this.note = committed ? `Committed locally, but push failed: ${e}` : `Commit failed: ${e}`;
         }
-      } catch (e) { if (this.current(context)) this.note = `Commit failed: ${e}`; }
-      finally { this.busy = false; this.refresh(cx, true); cx.notify(); }
+      } finally {
+        if (this.actionOpSeq === opSeq) this.busy = false;
+        if (this.current(context)) {
+          if (committed) {
+            if (message) {
+              this.message = "";
+              this.input.set_value("");
+            }
+            this.historyLoadedFor = null;
+          }
+          this.refresh(cx, true);
+          cx.notify();
+        }
+      }
     });
     cx.notify();
   }
@@ -1149,6 +1460,7 @@ export default class ChangesHistory extends View {
       relDate: commit.relDate,
       date: commit.date || "",
       subject: commit.subject,
+      ...(commit.stash ? { stash: commit.stash } : {}),
     };
     const tabTitle = `${commit.shortHash} ${commit.subject}`.slice(0, 32);
     const res = run("tab.new", {
@@ -1161,7 +1473,26 @@ export default class ChangesHistory extends View {
     }
   }
 
-  openCommit(commit, cx) {
+  async loadRegularCommitFiles(hash, root, on) {
+    const [nameStatusRes, numstatRes] = await Promise.all([
+      exec("git", [...READ, "diff-tree", "--no-commit-id", "--name-status", "-r", "--root", "-z", hash], { cwd: root, on, timeout: GIT_READ_TIMEOUT_MS }),
+      exec("git", [...READ, "diff-tree", "--no-commit-id", "--numstat", "-r", "--root", "-z", hash], { cwd: root, on, timeout: GIT_READ_TIMEOUT_MS }),
+    ]);
+    const stats = {};
+    if (numstatRes.code === 0) {
+      for (const entry of (numstatRes.stdout || "").split("\0")) {
+        const [added, deleted, ...parts] = entry.split("\t");
+        if (parts.length) stats[parts.join("\t")] = { add: Number(added) || 0, del: Number(deleted) || 0 };
+      }
+    }
+    if (nameStatusRes.code !== 0) return [];
+    return parseNameStatusZ(nameStatusRes.stdout, MAX_COMMIT_FILES).map(file => ({
+      ...file,
+      ...(stats[file.path] ?? { add: 0, del: 0 }),
+    }));
+  }
+
+  openCommit(commit, cx, fromRender = false) {
     this.selectedCommit = commit;
     this.commitFiles = [];
     this.commitOpenFile = null;
@@ -1171,35 +1502,10 @@ export default class ChangesHistory extends View {
     const context = this.context, root = this.root, on = this.on, hash = commit.hash;
     cx.spawn(async cx => {
       try {
-        const [nsRes, numRes] = await Promise.all([
-          exec("git", [...READ, "diff-tree", "--no-commit-id", "--name-status", "-r", "--root", "-z", hash], { cwd: root, on, timeout: 8000 }),
-          exec("git", [...READ, "diff-tree", "--no-commit-id", "--numstat", "-r", "--root", "-z", hash], { cwd: root, on, timeout: 8000 }),
-        ]);
+        const files = commit.stash
+          ? await loadStashFiles(exec, { root, on, ref: commit.stash })
+          : await this.loadRegularCommitFiles(hash, root, on);
         if (!this.current(context) || this.selectedCommit?.hash !== hash) return;
-
-        const stats = {};
-        if (numRes.code === 0) {
-          for (const entry of (numRes.stdout || "").split("\0")) {
-            const [a, d, ...parts] = entry.split("\t");
-            if (!parts.length) continue;
-            stats[parts.join("\t")] = { add: Number(a) || 0, del: Number(d) || 0 };
-          }
-        }
-
-        const files = [];
-        if (nsRes.code === 0) {
-          const tokens = (nsRes.stdout || "").split("\0");
-          for (let i = 0; i + 1 < tokens.length; i += 2) {
-            const rawStatus = tokens[i];
-            if (!rawStatus) continue;
-            const status = rawStatus[0];
-            let path = tokens[i + 1];
-            if ((status === "R" || status === "C") && i + 2 < tokens.length) { path = tokens[i + 2]; i += 1; }
-            if (!path) continue;
-            files.push({ path, status, ...(stats[path] ?? { add: 0, del: 0 }) });
-            if (files.length >= 400) break;
-          }
-        }
 
         this.commitFiles = files;
         if (files.length) {
@@ -1212,18 +1518,31 @@ export default class ChangesHistory extends View {
         if (this.current(context)) { this.commitDetailLoading = false; cx.notify(); }
       }
     });
-    cx.notify();
+    if (!fromRender) cx.notify();
   }
 
   async loadCommitFileDiff(hash, path, context) {
     const root = this.root, on = this.on;
-    const r = await exec("git", [...READ, "show", "--format=", "--no-ext-diff", "--no-textconv", "--no-color", hash, "--", path], { cwd: root, on, timeout: 8000 });
-    if (!this.current(context) || this.selectedCommit?.hash !== hash || this.commitOpenFile !== path) return;
-    if (r.code !== 0) { this.setCommitLines([r.stderr || "Cannot load diff"]); return; }
-    const all = (r.stdout || "").replace(/\n$/, "").split("\n");
-    const first = all.findIndex(l => l.startsWith("@@"));
-    const lines = first < 0 ? ["Binary file or empty diff"] : all.slice(first);
-    this.setCommitLines(lines.slice(0, MAX_DIFF_LINES).map(l => l.length > MAX_DIFF_LINE_CHARS ? l.slice(0, MAX_DIFF_LINE_CHARS) + "…" : l));
+    let rawStdout;
+    if (this.selectedCommit?.stash) {
+      const file = this.commitFiles.find(f => f.path === path);
+      rawStdout = await loadStashFileDiff(exec, {
+        root,
+        on,
+        ref: this.selectedCommit.stash,
+        path,
+        untracked: Boolean(file?.untracked),
+        stagedOnly: Boolean(file?.stagedOnly),
+        origPath: file?.origPath || "",
+      });
+      if (!this.current(context) || this.selectedCommit?.hash !== hash || this.commitOpenFile !== path) return;
+    } else {
+      const r = await exec("git", [...READ, "show", "--format=", "--no-ext-diff", "--no-textconv", "--no-color", hash, "--", path], { cwd: root, on, timeout: GIT_READ_TIMEOUT_MS });
+      if (!this.current(context) || this.selectedCommit?.hash !== hash || this.commitOpenFile !== path) return;
+      if (r.code !== 0) { this.setCommitLines([r.stderr || "Cannot load diff"]); return; }
+      rawStdout = r.stdout || "";
+    }
+    this.setCommitLines(parseDiffOutput(rawStdout).lines);
   }
 
   pickCommitFile(path, cx) {
@@ -1239,20 +1558,47 @@ export default class ChangesHistory extends View {
     cx.notify();
   }
 
-  setLines(lines) {
+  setLines(lines, parsed = null) {
+    this.diffParsed = parsed;
+    if (this.pendingConfirm?.kind === "revert-hunk") this.pendingConfirm = null;
+    const hunkCount = parsed?.hunks?.length ?? 0;
+    if (hunkCount === 0) this.selectedHunk = 0;
+    else if (this.selectedHunk >= hunkCount) this.selectedHunk = hunkCount - 1;
     this.rows = diffRows(lines);
+    this.overviewBuckets = computeOverviewBuckets(this.rows);
     this.longest = Math.max(0, ...this.rows.map(r => displayColumns(r.text)));
     this.gutterChars = Math.max(4, String(Math.max(0, ...this.rows.map(r => r.number ?? 0))).length);
   }
 
+  selectHunkByRowKey(rowKey, cx) {
+    const rowIndex = Number(rowKey);
+    if (!Number.isInteger(rowIndex)) return;
+    const row = this.rows[rowIndex];
+    if (!row || row.hunk === undefined || row.hunk < 0) return;
+    if (this.selectedHunk === row.hunk) return;
+    this.selectedHunk = row.hunk;
+    cx.notify();
+  }
+
+  stepHunk(delta, cx) {
+    const hunks = this.diffParsed?.hunks ?? [];
+    if (hunks.length <= 1) return;
+    this.selectedHunk = (this.selectedHunk + delta + hunks.length) % hunks.length;
+    const targetRow = hunks[this.selectedHunk]?.bodyStart;
+    if (targetRow !== undefined) this.diffScroll?.scroll_to_item(targetRow, "center");
+    cx.notify();
+  }
+
   setCommitLines(lines) {
     this.commitRows = diffRows(lines);
+    this.commitOverviewBuckets = computeOverviewBuckets(this.commitRows);
     this.commitLongest = Math.max(0, ...this.commitRows.map(r => displayColumns(r.text)));
     this.commitGutterChars = Math.max(4, String(Math.max(0, ...this.commitRows.map(r => r.number ?? 0))).length);
   }
 
   setPrLines(lines) {
     this.prRows = diffRows(lines);
+    this.prOverviewBuckets = computeOverviewBuckets(this.prRows);
     this.prLongest = Math.max(0, ...this.prRows.map(r => displayColumns(r.text)));
     this.prGutterChars = Math.max(4, String(Math.max(0, ...this.prRows.map(r => r.number ?? 0))).length);
   }
@@ -1306,7 +1652,7 @@ export default class ChangesHistory extends View {
     }
   }
 
-  openPullRequest(pr, cx) {
+  openPullRequest(pr, cx, fromRender = false) {
     this.selectedCommit = null;
     this.selectedPr = pr;
     this.prFiles = [];
@@ -1336,7 +1682,7 @@ export default class ChangesHistory extends View {
       }
       cx.notify();
     });
-    cx.notify();
+    if (!fromRender) cx.notify();
   }
 
   pickPrFile(path, cx) {
@@ -1369,12 +1715,364 @@ export default class ChangesHistory extends View {
 
   gutter(chars, size) { return Math.ceil(chars * charWidth(size)) + 2; }
 
-  diffRow({ kind, number, text }, t, size, gutterChars) {
+  diffMinWidth(longest, gutterChars, size) {
+    return Math.max(MIN_DIFF_WIDTH_PX, longest * charWidth(size) + this.gutter(gutterChars, size) + DIFF_ROW_EXTRA_PX);
+  }
+
+  canActOnHunks(file) {
+    if (!file || file.untracked || file.conflict) return false;
+    if (file.status === "R" || file.status === "C") return false;
+    if (!this.diffParsed?.hunks?.length) return false;
+    const isRenameHeader = this.diffParsed.header.some(line => line.startsWith("rename from ") || line.startsWith("copy from "));
+    return !isRenameHeader;
+  }
+
+  renderVSCodeButton(t, id, filePath) {
+    return this.actionBtn(
+      t,
+      id,
+      image("mods/changes-history/vscode.svg").w(16).h(16).flex_none(),
+      this.on ? "Open in VS Code (local repositories only)" : "Open in VS Code (clean profile)",
+      (_e, cx) => this.launchVSCode(filePath, cx),
+    ).when(Boolean(this.on), b => b.opacity(0.45));
+  }
+
+  renderHunkBar(file, t, prefix) {
+    const hunks = this.diffParsed?.hunks ?? [];
+    if (!this.canActOnHunks(file)) return null;
+    const activeIndex = Math.max(0, Math.min(this.selectedHunk, hunks.length - 1));
+    const activeHunk = hunks[activeIndex];
+    const hasMany = hunks.length > 1;
+    const lineLabel = activeHunk.newStart || activeHunk.oldStart;
+    return h_flex()
+      .h(28)
+      .flex_none()
+      .px(10)
+      .gap(6)
+      .items_center()
+      .bg(t.surface)
+      .border_b(1)
+      .border_color(t.border)
+      .child(
+        div()
+          .px(6)
+          .py(1)
+          .rounded(4)
+          .bg(t.selected)
+          .text_size(10.5)
+          .font_semibold()
+          .text_color(t.foreground)
+          .child(`Block ${activeIndex + 1}/${hunks.length}`),
+      )
+      .child(div().text_size(10.5).text_color(t.dim).child(`L${lineLabel}`))
+      .when(hasMany, el =>
+        el
+          .child(this.actionBtn(t, `${prefix}-hunk-prev`, "↑", "Previous block", (_e, cx) => this.stepHunk(-1, cx)))
+          .child(this.actionBtn(t, `${prefix}-hunk-next`, "↓", "Next block", (_e, cx) => this.stepHunk(1, cx))),
+      )
+      .child(div().flex_1().min_w(0))
+      .when(activeHunk.truncated, el =>
+        el.child(div().text_size(10.5).text_color(t.dim).child("Block truncated — use file actions")),
+      )
+      .when(!activeHunk.truncated && file.staged, el =>
+        el.child(
+          div()
+            .id(`${prefix}-hunk-unstage`)
+            .px(7)
+            .py(2)
+            .rounded(5)
+            .bg(t.raised)
+            .text_size(11)
+            .font_medium()
+            .text_color(t.foreground)
+            .cursor_pointer()
+            .hover(s => s.bg(t.hover))
+            .tooltip("Unstage selected block")
+            .on_click((_e, cx) => this.runHunkAction(activeIndex, "unstage", cx))
+            .child(this.hunkBusy ? "Working…" : "− Unstage block"),
+        ),
+      )
+      .when(!activeHunk.truncated && !file.staged, el =>
+        el
+          .child(
+            div()
+              .id(`${prefix}-hunk-stage`)
+              .px(7)
+              .py(2)
+              .rounded(5)
+              .bg(DIFF_COLORS.addBg)
+              .text_size(11)
+              .font_medium()
+              .text_color(DIFF_COLORS.addSign)
+              .cursor_pointer()
+              .hover(s => s.bg(DIFF_COLORS.rulerAdd + "66"))
+              .tooltip("Stage selected block")
+              .on_click((_e, cx) => this.runHunkAction(activeIndex, "stage", cx))
+              .child(this.hunkBusy ? "Working…" : "+ Stage block"),
+          )
+          .child(
+            div()
+              .id(`${prefix}-hunk-revert`)
+              .px(7)
+              .py(2)
+              .rounded(5)
+              .bg(DIFF_COLORS.delBg)
+              .text_size(11)
+              .font_medium()
+              .text_color(DIFF_COLORS.delSign)
+              .cursor_pointer()
+              .hover(s => s.bg(DIFF_COLORS.rulerDel + "66"))
+              .tooltip("Revert selected block")
+              .on_click((_e, cx) => this.requestRevertHunk(activeIndex, cx))
+              .child("↺ Revert block"),
+          ),
+      );
+  }
+
+  renderPendingConfirm(t) {
+    const confirmRequest = this.pendingConfirm;
+    const isDelete = confirmRequest.kind === "discard" && confirmRequest.file?.untracked;
+    const confirmMeta = {
+      discard: {
+        label: isDelete ? `Delete "${confirmRequest.file.path}"?` : `Discard changes in "${confirmRequest.file.path}"?`,
+        confirmText: isDelete ? "Delete" : "Discard",
+      },
+      "drop-stash": {
+        label: `Drop stash "${confirmRequest.stash?.ref}"?`,
+        confirmText: "Drop",
+      },
+      "revert-hunk": {
+        label: `Revert block #${(confirmRequest.index ?? 0) + 1}?`,
+        confirmText: "Revert",
+      },
+      "clear-stashes": {
+        label: `Clear all ${this.stashes.length} stashes?`,
+        confirmText: "Clear",
+      },
+      "amend-pushed": {
+        label: "HEAD is already pushed to upstream. Amend anyway?",
+        confirmText: "Amend",
+      },
+    }[confirmRequest.kind] ?? { label: "Confirm action?", confirmText: "Confirm" };
+
+    return v_flex()
+      .flex_none()
+      .px(10)
+      .py(7)
+      .gap(6)
+      .bg(DIFF_COLORS.delBg)
+      .border_b(1)
+      .border_color(SCM_COLORS.conflict)
+      .child(div().text_size(11.5).font_medium().text_color(t.foreground).child(confirmMeta.label))
+      .child(
+        h_flex()
+          .gap(6)
+          .justify_end()
+          .child(
+            div()
+              .id("sc-confirm-cancel")
+              .px(8)
+              .py(3)
+              .rounded(5)
+              .bg(t.raised)
+              .text_size(11)
+              .text_color(t.foreground)
+              .cursor_pointer()
+              .hover(s => s.bg(t.hover))
+              .on_click((_e, cx) => {
+                this.pendingConfirm = null;
+                cx.notify();
+              })
+              .child("Cancel"),
+          )
+          .child(
+            div()
+              .id("sc-confirm-ok")
+              .px(8)
+              .py(3)
+              .rounded(5)
+              .bg(t.ansi1)
+              .text_size(11)
+              .font_semibold()
+              .text_color(t.solid_foreground)
+              .cursor_pointer()
+              .on_click((_e, cx) => this.confirmPendingAction(cx))
+              .child(confirmMeta.confirmText),
+          ),
+      );
+  }
+
+  renderNoteBar(t) {
+    const flatNote = String(this.note || "").replace(/\s*\n\s*/g, " · ");
+    return h_flex()
+      .px(10)
+      .py(5)
+      .gap(6)
+      .items_center()
+      .border_b(1)
+      .border_color(t.border)
+      .tooltip(this.note)
+      .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(SCM_COLORS.conflict).child(flatNote))
+      .child(this.actionBtn(t, "sc-note-x", "×", "Dismiss", (_e, cx) => { this.note = null; cx.notify(); }));
+  }
+
+  renderHunkHeaderRow(text, hunk, parsedHunk, t, height) {
+    const isSelected = hunk === this.selectedHunk;
+    return h_flex()
+      .w_full()
+      .px(8)
+      .h(height)
+      .flex_none()
+      .gap(6)
+      .items_center()
+      .bg(isSelected ? t.selected : t.raised)
+      .child(
+        div()
+          .flex_none()
+          .px(5)
+          .py(0)
+          .rounded(4)
+          .bg(isSelected ? t.accent : t.surface)
+          .text_size(10.5)
+          .font_semibold()
+          .text_color(isSelected ? t.accent_foreground : t.muted)
+          .child(`#${hunk + 1}`),
+      )
+      .child(div().flex_1().min_w(0).truncate().text_color(isSelected ? t.foreground : t.dim).child(text))
+      .when(parsedHunk.truncated, el => el.child(div().flex_none().text_size(10).text_color(t.dim).child("truncated")));
+  }
+
+  diffRow({ kind, number, text, hunk }, t, size, gutterChars, showHunkBadges = false) {
     const height = rowHeight(size);
-    if (kind === "@") return div().w_full().px(10).h(height).flex_none().truncate().bg(t.raised).text_color(t.dim).child(text);
-    return h_flex().w_full().h(height).flex_none().gap(8).when(kind === "+", (e) => e.bg(t.ansi2 + "18")).when(kind === "-", (e) => e.bg(t.ansi1 + "18"))
+    if (kind === "@") {
+      const parsedHunk = showHunkBadges ? this.diffParsed?.hunks?.[hunk] : null;
+      if (parsedHunk) return this.renderHunkHeaderRow(text, hunk, parsedHunk, t, height);
+      return div().w_full().px(10).h(height).flex_none().truncate().bg(t.raised).text_color(t.dim).child(text);
+    }
+    const isAdd = kind === "+";
+    const isDel = kind === "-";
+    const signColor = isAdd ? DIFF_COLORS.addSign : isDel ? DIFF_COLORS.delSign : t.dim;
+    const sign = isAdd || isDel ? kind : " ";
+    return h_flex()
+      .w_full()
+      .h(height)
+      .flex_none()
+      .gap(6)
+      .when(isAdd, (e) => e.bg(DIFF_COLORS.addBg))
+      .when(isDel, (e) => e.bg(DIFF_COLORS.delBg))
+      .child(
+        div()
+          .w(3)
+          .h_full()
+          .flex_none()
+          .when(isAdd, el => el.bg(DIFF_COLORS.rulerEdgeAdd))
+          .when(isDel, el => el.bg(DIFF_COLORS.rulerEdgeDel)),
+      )
       .child(div().w(this.gutter(gutterChars, size)).flex_none().text_right().text_color(t.dim).child(number === undefined ? "" : String(number)))
+      .child(div().w(10).flex_none().text_center().font_semibold().text_color(signColor).child(sign))
       .child(div().flex_1().min_w(0).truncate().child(text));
+  }
+
+  renderDiffOverviewRuler({ listId, rows, buckets, scrollHandle, t, selectHunks }) {
+    if (!buckets.length || !rows.length) return null;
+    const rulerId = `${listId}-ruler`;
+    return v_flex()
+      .id(rulerId)
+      .w(16)
+      .h_full()
+      .flex_none()
+      .bg(DIFF_COLORS.rulerTrack)
+      .border_l(1)
+      .border_color(t.border)
+      .cursor_pointer()
+      .tooltip("Click to jump to diff position")
+      .on_size_change((sz) => {
+        this.rulerHeights[listId] = sz.height / (settings().zoom || 1);
+      })
+      .on_mouse_down("left", (e, cx) => {
+        const zoom = settings().zoom || 1;
+        const height = e.bounds?.height ?? (this.rulerHeights[listId] || 1) * zoom;
+        const localY = e.local_position?.y ?? 0;
+        const ratio = Math.max(0, Math.min(1, localY / Math.max(1, height)));
+        const targetRow = Math.min(rows.length - 1, Math.floor(ratio * rows.length));
+        scrollHandle?.scroll_to_item(targetRow, "center");
+        if (selectHunks) this.selectHunkByRowKey(String(targetRow), cx);
+        cx.notify();
+      })
+      .children(
+        buckets.map((bucket) =>
+          h_flex()
+            .flex_1()
+            .w_full()
+            .child(
+              div()
+                .w(2)
+                .h_full()
+                .flex_none()
+                .bg(bucket.hasDel ? DIFF_COLORS.rulerEdgeDel : bucket.hasAdd ? DIFF_COLORS.rulerEdgeAdd : DIFF_COLORS.rulerTrack),
+            )
+            .child(
+              div()
+                .w(7)
+                .h_full()
+                .flex_none()
+                .bg(bucket.hasDel ? DIFF_COLORS.rulerDel : DIFF_COLORS.rulerTrack),
+            )
+            .child(
+              div()
+                .w(7)
+                .h_full()
+                .flex_none()
+                .bg(bucket.hasAdd ? DIFF_COLORS.rulerAdd : DIFF_COLORS.rulerTrack),
+            ),
+        ),
+      );
+  }
+
+  renderVirtualizedDiff({ listId, xId, rows, longest, gutterChars, size, t, scrollHandle, overviewBuckets, showHunkBadges = false, selectHunks = false }) {
+    const ruler = this.renderDiffOverviewRuler({ listId, rows, buckets: overviewBuckets, scrollHandle, t, selectHunks });
+    return h_flex()
+      .flex_1()
+      .min_h(0)
+      .font_family(settings().font_family ?? "JetBrains Mono")
+      .text_size(size)
+      .child(
+        div()
+          .flex_1()
+          .min_w(0)
+          .h_full()
+          .relative()
+          .child(
+            div()
+              .id(xId)
+              .size_full()
+              .overflow_x_scrollbar()
+              .child(
+                div()
+                  .w_full()
+                  .min_w(this.diffMinWidth(longest, gutterChars, size))
+                  .h_full()
+                  .child(
+                    v_virtual_list(
+                      listId,
+                      rows.length,
+                      rowHeight(size),
+                      (i) => String(i),
+                      (range) => rows.slice(range.start, range.end).map((row) => this.diffRow(row, t, size, gutterChars, showHunkBadges)),
+                    )
+                      .when(Boolean(scrollHandle), list => list.track_scroll(scrollHandle))
+                      .when(selectHunks, list =>
+                        list
+                          .on_item_click((rowKey, cx) => this.selectHunkByRowKey(rowKey, cx))
+                          .on_item_secondary_click((rowKey, _e, cx) => this.selectHunkByRowKey(rowKey, cx)),
+                      )
+                      .size_full(),
+                  ),
+              ),
+          )
+          .child(Scrollbar.vertical(listId).viewport_from_layout().absolute().inset_0()),
+      )
+      .when(Boolean(ruler), el => el.child(ruler));
   }
 
   actionBtn(t, id, label, tip, onClick) {
@@ -1383,6 +2081,9 @@ export default class ChangesHistory extends View {
       .px(5)
       .py(2)
       .rounded(5)
+      .flex()
+      .items_center()
+      .justify_center()
       .text_size(11.5)
       .text_color(t.dim)
       .cursor_pointer()
@@ -1427,9 +2128,12 @@ export default class ChangesHistory extends View {
     const parts = file.path.split("/");
     const name = parts.pop();
     const dir = parts.join("/");
-    const rowId = `sc-${file.staged ? "s" : "u"}-${file.path}`;
+    const rowPrefix = file.conflict ? "c" : file.staged ? "s" : "u";
+    const rowId = `sc-${rowPrefix}-${file.path}`;
     const isSelected = this.open?.path === file.path && this.open?.staged === file.staged;
     const isHovered = this.hoveredRow === rowId;
+    const color = scmColor(file.status);
+    const subtitle = file.origPath ? (dir ? `${file.origPath} → ${dir}` : `${file.origPath} →`) : dir;
 
     return h_flex()
       .id(rowId)
@@ -1448,24 +2152,27 @@ export default class ChangesHistory extends View {
         else if (this.hoveredRow === rowId) this.hoveredRow = null;
         cx.notify();
       })
-      .tooltip(`${file.path}\nClick: open diff in current tab · Ctrl+Click: open diff in new tab`)
+      .tooltip(`${file.origPath ? `${file.origPath} → ` : ""}${file.path}\nClick: open diff in current tab · Ctrl+Click: open diff in new tab`)
       .on_click((e) => {
         const openInNewTab = Boolean(e?.modifiers?.control || e?.modifiers?.platform);
         this.openFileDiff(file, openInNewTab);
       })
       .child(image(fileIcon(name)).w(16).h(16).flex_none())
-      .child(div().flex_none().max_w(165).truncate().text_size(12).text_color(t.foreground).child(name))
-      .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(dir))
+      .child(div().flex_none().max_w(165).truncate().text_size(12).text_color(color).when(file.status === "D", el => el.line_through()).child(name))
+      .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(subtitle))
       .when(isHovered, el =>
         el
           .child(this.actionBtn(t, `${rowId}-open`, "↗", "Open file (Ctrl+Click: new tab)", (e) => this.openInViewer(file.path, e)))
-          .when(!file.staged, r => r
+          .when(Boolean(file.conflict), r => r
+            .child(this.actionBtn(t, `${rowId}-res`, "+", "Mark as resolved", (_e, cx) => this.stageFile(file.path, cx))))
+          .when(!file.staged && !file.conflict, r => r
+            .child(this.actionBtn(t, `${rowId}-stash`, "S", "Stash this file (incl. staged)", (_e, cx) => this.stashPush(cx, file.untracked ? "all" : "tracked", [file.path])))
             .child(this.actionBtn(t, `${rowId}-disc`, "↺", file.untracked ? "Delete untracked file" : "Discard changes", (_e, cx) => this.requestDiscardFile(file, cx)))
             .child(this.actionBtn(t, `${rowId}-add`, "+", "Stage changes", (_e, cx) => this.stageFile(file.path, cx))))
           .when(file.staged, r => r
-            .child(this.actionBtn(t, `${rowId}-un`, "−", "Unstage changes", (_e, cx) => this.unstageFile(file.path, cx)))),
+            .child(this.actionBtn(t, `${rowId}-un`, "−", "Unstage changes", (_e, cx) => this.unstageFile(file, cx)))),
       )
-      .child(div().w(14).text_right().text_size(11).font_semibold().text_color(statusColor(file.status, t)).child(file.status));
+      .child(div().w(14).text_right().text_size(11).font_semibold().text_color(color).child(file.status));
   }
 
   renderCommitDetail(t, size) {
@@ -1530,11 +2237,11 @@ export default class ChangesHistory extends View {
                     .hover(s => s.bg(t.hover))
                     .on_click((_e, cx) => this.pickCommitFile(f.path, cx))
                     .child(image(fileIcon(name)).w(15).h(15).flex_none())
-                    .child(div().flex_none().max_w(160).truncate().text_size(12).text_color(t.foreground).child(name))
+                    .child(div().flex_none().max_w(160).truncate().text_size(12).text_color(scmColor(f.status)).when(f.status === "D", e => e.line_through()).child(name))
                     .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(parts.join("/")))
-                    .when(f.add > 0, e => e.child(div().text_size(10.5).text_color(t.ansi2).child(`+${f.add}`)))
-                    .when(f.del > 0, e => e.child(div().text_size(10.5).text_color(t.ansi1).child(`−${f.del}`)))
-                    .child(div().w(14).text_right().text_size(11).font_semibold().text_color(statusColor(f.status, t)).child(f.status));
+                    .when(f.add > 0, e => e.child(div().text_size(10.5).text_color(DIFF_COLORS.addSign).child(`+${f.add}`)))
+                    .when(f.del > 0, e => e.child(div().text_size(10.5).text_color(DIFF_COLORS.delSign).child(`−${f.del}`)))
+                    .child(div().w(14).text_right().text_size(11).font_semibold().text_color(scmColor(f.status)).child(f.status));
                 }),
               )
               .when(!this.commitFiles.length, e =>
@@ -1544,34 +2251,17 @@ export default class ChangesHistory extends View {
           .child(Scrollbar.vertical("hist-files-list").absolute().inset_0()),
       )
       .child(
-        div()
-          .flex_1()
-          .min_h(0)
-          .relative()
-          .font_family(settings().font_family ?? "JetBrains Mono")
-          .text_size(size)
-          .child(
-            div()
-              .id("hist-diff-x")
-              .size_full()
-              .overflow_x_scrollbar()
-              .child(
-                div()
-                  .w_full()
-                  .min_w(Math.max(300, this.commitLongest * charWidth(size) + this.gutter(this.commitGutterChars, size) + 20))
-                  .h_full()
-                  .child(
-                    v_virtual_list(
-                      "hist-diff",
-                      this.commitRows.length,
-                      rowHeight(size),
-                      (i) => String(i),
-                      (range) => this.commitRows.slice(range.start, range.end).map((row) => this.diffRow(row, t, size, this.commitGutterChars)),
-                    ).size_full(),
-                  ),
-              ),
-          )
-          .child(Scrollbar.vertical("hist-diff").viewport_from_layout().absolute().inset_0()),
+        this.renderVirtualizedDiff({
+          listId: "hist-diff",
+          xId: "hist-diff-x",
+          rows: this.commitRows,
+          longest: this.commitLongest,
+          gutterChars: this.commitGutterChars,
+          size,
+          t,
+          scrollHandle: this.commitDiffScroll,
+          overviewBuckets: this.commitOverviewBuckets,
+        }),
       );
   }
 
@@ -1656,11 +2346,11 @@ export default class ChangesHistory extends View {
                     .hover(s => s.bg(t.hover))
                     .on_click((_e, cx) => this.pickPrFile(f.path, cx))
                     .child(image(fileIcon(name)).w(15).h(15).flex_none())
-                    .child(div().flex_none().max_w(160).truncate().text_size(12).text_color(t.foreground).child(name))
+                    .child(div().flex_none().max_w(160).truncate().text_size(12).text_color(scmColor(f.status)).when(f.status === "D", e => e.line_through()).child(name))
                     .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(parts.join("/")))
-                    .when(f.add > 0, e => e.child(div().text_size(10.5).text_color(t.ansi2).child(`+${f.add}`)))
-                    .when(f.del > 0, e => e.child(div().text_size(10.5).text_color(t.ansi1).child(`−${f.del}`)))
-                    .child(div().w(14).text_right().text_size(11).font_semibold().text_color(statusColor(f.status, t)).child(f.status));
+                    .when(f.add > 0, e => e.child(div().text_size(10.5).text_color(DIFF_COLORS.addSign).child(`+${f.add}`)))
+                    .when(f.del > 0, e => e.child(div().text_size(10.5).text_color(DIFF_COLORS.delSign).child(`−${f.del}`)))
+                    .child(div().w(14).text_right().text_size(11).font_semibold().text_color(scmColor(f.status)).child(f.status));
                 }),
               )
               .when(!this.prFiles.length, e =>
@@ -1670,40 +2360,24 @@ export default class ChangesHistory extends View {
           .child(Scrollbar.vertical("pr-files-list").absolute().inset_0()),
       )
       .child(
-        div()
-          .flex_1()
-          .min_h(0)
-          .relative()
-          .font_family(settings().font_family ?? "JetBrains Mono")
-          .text_size(size)
-          .child(
-            div()
-              .id("pr-diff-x")
-              .size_full()
-              .overflow_x_scrollbar()
-              .child(
-                div()
-                  .w_full()
-                  .min_w(Math.max(300, this.prLongest * charWidth(size) + this.gutter(this.prGutterChars, size) + 20))
-                  .h_full()
-                  .child(
-                    v_virtual_list(
-                      "pr-diff",
-                      this.prRows.length,
-                      rowHeight(size),
-                      (i) => String(i),
-                      (range) => this.prRows.slice(range.start, range.end).map((row) => this.diffRow(row, t, size, this.prGutterChars)),
-                    ).size_full(),
-                  ),
-              ),
-          )
-          .child(Scrollbar.vertical("pr-diff").viewport_from_layout().absolute().inset_0()),
+        this.renderVirtualizedDiff({
+          listId: "pr-diff",
+          xId: "pr-diff-x",
+          rows: this.prRows,
+          longest: this.prLongest,
+          gutterChars: this.prGutterChars,
+          size,
+          t,
+          scrollHandle: this.prDiffScroll,
+          overviewBuckets: this.prOverviewBuckets,
+        }),
       );
   }
 
   renderStandaloneFileDiff(t, size) {
     const file = this.standaloneFile;
     const name = file.path.split("/").pop() || file.path;
+    const showHunkBadges = this.canActOnHunks(file);
     return v_flex()
       .id("changes-filediff-tab")
       .size_full()
@@ -1711,6 +2385,14 @@ export default class ChangesHistory extends View {
       .bg(t.background)
       .text_color(t.foreground)
       .text_size(13)
+      .track_focus(this.handle)
+      .on_key_down((e, cx) => {
+        if (e.key === "escape" && this.pendingConfirm) {
+          this.pendingConfirm = null;
+          cx.stop_propagation();
+          cx.notify();
+        }
+      })
       .child(
         h_flex()
           .h(34)
@@ -1721,47 +2403,60 @@ export default class ChangesHistory extends View {
           .border_b(1)
           .border_color(t.border)
           .child(image(fileIcon(name)).w(16).h(16).flex_none())
-          .child(div().px(5).py(1).rounded(4).bg(t.surface).text_size(10.5).font_semibold().text_color(statusColor(file.status, t)).child(file.staged ? `Staged · ${file.status}` : file.status))
+          .child(div().px(5).py(1).rounded(4).bg(t.surface).text_size(10.5).font_semibold().text_color(scmColor(file.status)).child(file.staged ? `Staged · ${file.status}` : file.status))
           .child(div().flex_1().min_w(0).truncate().font_medium().text_size(12).text_color(t.foreground).child(file.path))
+          .child(
+            div()
+              .id("sfd-toggle-staged")
+              .px(6)
+              .py(2)
+              .rounded(4)
+              .bg(file.staged ? t.selected : t.surface)
+              .text_size(10.5)
+              .text_color(file.staged ? t.foreground : t.muted)
+              .cursor_pointer()
+              .hover(s => s.bg(t.hover).text_color(t.foreground))
+              .tooltip(file.staged ? "Switch to Working Tree diff" : "Switch to Staged diff")
+              .on_click((_e, cx) => this.toggleStandaloneStaged(cx))
+              .child(file.staged ? "Staged ⇄" : "Working ⇄"),
+          )
+          .child(
+            this.actionBtn(
+              t,
+              "sfd-file-stage",
+              file.staged ? "− File" : "+ File",
+              file.staged ? "Unstage entire file" : "Stage entire file",
+              (_e, cx) => this.runStandaloneFileAction(!file.staged, cx),
+            ),
+          )
+          .child(this.renderVSCodeButton(t, "sfd-vscode", file.status === "D" ? null : file.path))
           .child(this.actionBtn(t, "sfd-refresh", "↻", "Refresh diff", (_e, cx) => this.loadStandaloneFileDiff(cx)))
           .child(this.actionBtn(t, "sfd-open", "↗", "Open full file", (e) => this.openInViewer(file.path, e))),
       )
+      .when(showHunkBadges, el => el.child(this.renderHunkBar(file, t, "sfd")))
+      .when(Boolean(this.pendingConfirm), el => el.child(this.renderPendingConfirm(t)))
+      .when(Boolean(this.note), el => el.child(this.renderNoteBar(t)))
       .child(
-        div()
-          .flex_1()
-          .min_h(0)
-          .relative()
-          .font_family(settings().font_family ?? "JetBrains Mono")
-          .text_size(size)
-          .child(
-            div()
-              .id("sfd-diff-x")
-              .size_full()
-              .overflow_x_scrollbar()
-              .child(
-                div()
-                  .w_full()
-                  .min_w(Math.max(300, this.longest * charWidth(size) + this.gutter(this.gutterChars, size) + 20))
-                  .h_full()
-                  .child(
-                    v_virtual_list(
-                      "sfd-diff",
-                      this.rows.length,
-                      rowHeight(size),
-                      (i) => String(i),
-                      (range) => this.rows.slice(range.start, range.end).map((row) => this.diffRow(row, t, size, this.gutterChars)),
-                    ).size_full(),
-                  ),
-              ),
-          )
-          .child(Scrollbar.vertical("sfd-diff").viewport_from_layout().absolute().inset_0()),
+        this.renderVirtualizedDiff({
+          listId: "sfd-diff",
+          xId: "sfd-diff-x",
+          rows: this.rows,
+          longest: this.longest,
+          gutterChars: this.gutterChars,
+          size,
+          t,
+          scrollHandle: this.diffScroll,
+          overviewBuckets: this.overviewBuckets,
+          showHunkBadges,
+          selectHunks: true,
+        }),
       );
   }
 
   render(cx) {
     const t = theme(), s = settings(), size = s.font_size, fontFamily = s.font_family ?? s.font;
     if (this.standaloneCommit && this.selectedCommit) {
-      if (!checking()) this.checkStandaloneHibernation(cx);
+      if (!checking()) this.checkStandaloneHibernation(cx, true);
       return v_flex()
         .id("changes-commit-tab")
         .size_full()
@@ -1774,13 +2469,13 @@ export default class ChangesHistory extends View {
     }
     if (this.standaloneFileDiff && this.standaloneFile) {
       if (!checking()) {
-        this.checkStandaloneHibernation(cx);
-        this.checkSharedDiffOpen(cx);
+        this.checkStandaloneHibernation(cx, true);
+        this.checkSharedDiffOpen(cx, true);
       }
       return this.renderStandaloneFileDiff(t, size).when(Boolean(fontFamily), el => el.font_family(fontFamily));
     }
     if (this.standalonePr && this.selectedPr) {
-      if (!checking()) this.checkStandaloneHibernation(cx);
+      if (!checking()) this.checkStandaloneHibernation(cx, true);
       return v_flex()
         .id("changes-pr-tab")
         .size_full()
@@ -1796,7 +2491,7 @@ export default class ChangesHistory extends View {
       else this.refreshIfDue(cx);
     }
     const totalChanges = this.staged.length + this.unstaged.length;
-    const canCommit = Boolean(this.message.trim() && this.root && !this.busy && !this.loading && totalChanges > 0);
+    const canCommit = Boolean(this.message.trim() && this.root && !this.busy && !this.hunkBusy && !this.loading && this.conflicts.length === 0 && totalChanges > 0);
 
     return v_flex()
       .id("changes")
@@ -1847,6 +2542,13 @@ export default class ChangesHistory extends View {
           cx.notify();
           return;
         }
+        if (e.key === "escape" && (this.stashMenuOpen || this.commitMenuOpen)) {
+          this.stashMenuOpen = false;
+          this.commitMenuOpen = false;
+          cx.stop_propagation();
+          cx.notify();
+          return;
+        }
         if (e.key === "escape" && this.typing) {
           this.typing = false;
           this.handle.focus();
@@ -1891,9 +2593,15 @@ export default class ChangesHistory extends View {
           .child(div().flex_1())
           .when(Boolean(this.root), el =>
             el
-              .child(this.actionBtn(t, "sc-stash", "S+", "Stash changes (uses message if set)", (_e, cx) => this.stashPush(cx)))
+              .child(this.actionBtn(t, "sc-stash", "S+", "Stash changes (uses message if set)", (_e, cx) => this.stashPush(cx, "all")))
+              .child(this.actionBtn(t, "sc-stash-menu", "▾", "Stash options", (_e, cx) => {
+                this.commitMenuOpen = false;
+                this.stashMenuOpen = !this.stashMenuOpen;
+                cx.notify();
+              }))
               .child(this.actionBtn(t, "sc-pull", "↓", "Git pull", (_e, cx) => this.runGitAction(["pull"], cx)))
               .child(this.actionBtn(t, "sc-push", "↑", "Git push", (_e, cx) => this.runGitAction(["push"], cx)))
+              .child(this.renderVSCodeButton(t, "sc-vscode", null))
               .child(this.actionBtn(t, "sc-refresh", "↻", "Refresh", (_e, cx) => this.refresh(cx, true))),
           ),
       )
@@ -1901,7 +2609,37 @@ export default class ChangesHistory extends View {
       .when(!this.selectedCommit && Boolean(this.selectedPr), el => el.child(this.renderPrDetail(t, size)))
       .when(!this.selectedCommit && !this.selectedPr, el =>
         el
-          // VS Code-style top Commit Box
+          .when(Boolean(this.root) && this.stashMenuOpen, sm =>
+            sm.child(
+              v_flex()
+                .id("sc-stash-dropdown")
+                .flex_none()
+                .mx(8)
+                .mt(4)
+                .p(4)
+                .gap(2)
+                .rounded(6)
+                .bg(t.surface)
+                .border_1()
+                .border_color(t.border)
+                .children([
+                  { id: "all", label: "Stash All (incl. untracked)" },
+                  { id: "tracked", label: "Stash Tracked" },
+                  { id: "staged", label: "Stash Staged" },
+                ].map(opt =>
+                  h_flex()
+                    .id(`stash-opt-${opt.id}`)
+                    .h(24)
+                    .px(8)
+                    .items_center()
+                    .rounded(4)
+                    .cursor_pointer()
+                    .hover(s => s.bg(t.hover))
+                    .on_click((_e, cx) => this.stashPush(cx, opt.id))
+                    .child(div().text_size(11.5).text_color(t.foreground).child(opt.label)),
+                )),
+            ),
+          )
           .when(Boolean(this.root), box =>
             box.child(
               v_flex()
@@ -1927,7 +2665,7 @@ export default class ChangesHistory extends View {
                 )
                 .child(
                   h_flex()
-                    .gap(6)
+                    .gap(4)
                     .child(
                       div()
                         .id("commit-btn")
@@ -1942,81 +2680,65 @@ export default class ChangesHistory extends View {
                         .text_size(12)
                         .font_medium()
                         .when(canCommit, b => b.cursor_pointer())
-                        .on_click((_e, cx) => this.commit(cx))
+                        .on_click((_e, cx) => this.commit(cx, "smart"))
                         .child(this.busy ? "Working…" : this.staged.length > 0 ? `✓ Commit (${this.staged.length} staged)` : "✓ Commit"),
-                    ),
-                ),
-            ),
-          )
-          .when(Boolean(this.pendingConfirm), el => {
-            const req = this.pendingConfirm;
-            const isDelete = req.kind === "discard" && req.file?.untracked;
-            const label = req.kind === "discard"
-              ? (isDelete ? `Delete "${req.file.path}"?` : `Discard changes in "${req.file.path}"?`)
-              : `Drop stash "${req.stash.ref}"?`;
-            const confirmText = isDelete ? "Delete" : req.kind === "discard" ? "Discard" : "Drop";
-            return el.child(
-              v_flex()
-                .flex_none()
-                .px(10)
-                .py(7)
-                .gap(6)
-                .bg(t.ansi1 + "1a")
-                .border_b(1)
-                .border_color(t.ansi1)
-                .child(div().text_size(11.5).font_medium().text_color(t.foreground).child(label))
-                .child(
-                  h_flex()
-                    .gap(6)
-                    .justify_end()
-                    .child(
-                      div()
-                        .id("sc-confirm-cancel")
-                        .px(8)
-                        .py(3)
-                        .rounded(5)
-                        .bg(t.raised)
-                        .text_size(11)
-                        .text_color(t.foreground)
-                        .cursor_pointer()
-                        .hover(s => s.bg(t.hover))
-                        .on_click((_e, cx) => {
-                          this.pendingConfirm = null;
-                          cx.notify();
-                        })
-                        .child("Cancel"),
                     )
                     .child(
                       div()
-                        .id("sc-confirm-ok")
-                        .px(8)
-                        .py(3)
-                        .rounded(5)
-                        .bg(t.ansi1)
+                        .id("commit-menu-btn")
+                        .w(28)
+                        .h(28)
+                        .rounded(6)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(this.commitMenuOpen ? t.selected : t.raised)
+                        .text_color(t.foreground)
                         .text_size(11)
-                        .font_semibold()
-                        .text_color("#ffffff")
                         .cursor_pointer()
-                        .on_click((_e, cx) => this.confirmPendingAction(cx))
-                        .child(confirmText),
+                        .hover(s => s.bg(t.hover))
+                        .tooltip("Commit options")
+                        .on_click((_e, cx) => {
+                          this.stashMenuOpen = false;
+                          this.commitMenuOpen = !this.commitMenuOpen;
+                          cx.notify();
+                        })
+                        .child("▾"),
                     ),
+                )
+                .when(this.commitMenuOpen, cm =>
+                  cm.child(
+                    v_flex()
+                      .id("sc-commit-dropdown")
+                      .p(4)
+                      .gap(2)
+                      .rounded(6)
+                      .bg(t.surface)
+                      .border_1()
+                      .border_color(t.border)
+                      .children([
+                        { id: "smart", label: "✓ Commit" },
+                        { id: "staged", label: "✓ Commit Staged" },
+                        { id: "push", label: "↑ Commit & Push" },
+                        { id: "amend", label: "✎ Commit (Amend)" },
+                      ].map(opt =>
+                        h_flex()
+                          .id(`commit-opt-${opt.id}`)
+                          .h(24)
+                          .px(8)
+                          .items_center()
+                          .rounded(4)
+                          .cursor_pointer()
+                          .hover(s => s.bg(t.hover))
+                          .on_click((_e, cx) => this.commit(cx, opt.id))
+                          .child(div().text_size(11.5).text_color(t.foreground).child(opt.label)),
+                      )),
+                  ),
                 ),
-            );
-          })
-          .when(Boolean(this.note), el =>
-            el.child(
-              h_flex()
-                .px(10)
-                .py(5)
-                .gap(6)
-                .items_center()
-                .border_b(1)
-                .border_color(t.border)
-                .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.ansi1).child(this.note))
-                .child(this.actionBtn(t, "sc-note-x", "×", "Dismiss", (_e, cx) => { this.note = null; cx.notify(); })),
             ),
           )
-          // Top scrollable section (Staged + Changes) + resizable bottom section (Stashes + Graph)
+          .when(Boolean(this.pendingConfirm), el => el.child(this.renderPendingConfirm(t)))
+          .when(Boolean(this.note), el => el.child(this.renderNoteBar(t)))
           .when(!this.root, e =>
             e.child(div().flex_1().p(12).text_size(12).text_color(t.dim).child(this.error || (this.loading ? "Loading…" : "Not a git repository"))),
           )
@@ -2033,6 +2755,14 @@ export default class ChangesHistory extends View {
                   .min_h(80)
                   .overflow_y_scrollbar()
                   .py(4)
+                  .when(this.conflicts.length > 0, m =>
+                    m
+                      .child(this.sectionHeader(t, "sec-merge", "Merge Changes", this.secMerge, this.conflicts.length, (_e, cx) => {
+                        this.secMerge = !this.secMerge;
+                        cx.notify();
+                      }))
+                      .when(this.secMerge, list => list.child(v_flex().px(4).pb(4).children(this.conflicts.map(f => this.fileRow(f, t))))),
+                  )
                   .when(this.staged.length > 0, s =>
                     s
                       .child(this.sectionHeader(t, "sec-staged", "Staged Changes", this.secStaged, this.staged.length, (_e, cx) => {
@@ -2045,7 +2775,7 @@ export default class ChangesHistory extends View {
                     this.secChanges = !this.secChanges;
                     cx.notify();
                   }, this.unstaged.length > 0 ? [
-                    this.actionBtn(t, "sc-stash-sec", "S+", "Stash all changes", (_e, cx) => this.stashPush(cx)),
+                    this.actionBtn(t, "sc-stash-sec", "S+", "Stash all changes", (_e, cx) => this.stashPush(cx, "all")),
                     this.actionBtn(t, "sc-stage-all", "+", "Stage all changes", (_e, cx) => this.stageAll(cx)),
                   ] : []))
                   .when(this.secChanges, list =>
@@ -2054,13 +2784,12 @@ export default class ChangesHistory extends View {
                         .px(4)
                         .pb(4)
                         .children(this.unstaged.map(f => this.fileRow(f, t)))
-                        .when(!this.unstaged.length && !this.staged.length, empty =>
+                        .when(!this.unstaged.length && !this.staged.length && !this.conflicts.length, empty =>
                           empty.child(div().px(14).py(6).text_size(11.5).text_color(t.dim).child("No uncommitted changes")),
                         ),
                     ),
                   ),
               )
-              // Draggable horizontal resize divider between Changes and Stashes/Graph
               .child(
                 div()
                   .id("sc-split-drag")
@@ -2086,7 +2815,6 @@ export default class ChangesHistory extends View {
                   })
                   .child(div().w_full().h(1).bg(this.draggingSplit ? t.accent : t.border)),
               )
-              // Bottom resizable pane (Stashes + Graph)
               .child(
                 v_flex()
                   .id("sc-bottom")
@@ -2097,7 +2825,28 @@ export default class ChangesHistory extends View {
                     this.sectionHeader(t, "sec-stashes", "Stashes", this.secStashes, this.stashes.length, (_e, cx) => {
                       this.secStashes = !this.secStashes;
                       cx.notify();
-                    }, [this.actionBtn(t, "sc-stash-add", "+", "Create stash", (_e, cx) => this.stashPush(cx))]),
+                    }, [
+                      div()
+                        .id("sc-stash-keep-index")
+                        .px(5)
+                        .py(1)
+                        .rounded(4)
+                        .bg(this.stashKeepIndex ? t.selected : t.surface)
+                        .text_size(10)
+                        .text_color(this.stashKeepIndex ? t.foreground : t.dim)
+                        .cursor_pointer()
+                        .hover(s => s.bg(this.stashKeepIndex ? t.selected : t.hover).text_color(t.foreground))
+                        .tooltip("Restore staged state when applying/popping (--index)")
+                        .on_click((_e, cx) => {
+                          cx.stop_propagation();
+                          this.stashKeepIndex = !this.stashKeepIndex;
+                          localStorage.setItem("sc.stashIndex", this.stashKeepIndex ? "1" : "0");
+                          cx.notify();
+                        })
+                        .child("Keep staged"),
+                      ...(this.stashes.length > 0 ? [this.actionBtn(t, "sc-stash-clear", "Clear", "Clear all stashes", (_e, cx) => this.requestClearStashes(cx))] : []),
+                      this.actionBtn(t, "sc-stash-add", "+", "Create stash", (_e, cx) => this.stashPush(cx, "all")),
+                    ]),
                   )
                   .when(this.secStashes, list =>
                     list.child(
@@ -2117,8 +2866,26 @@ export default class ChangesHistory extends View {
                               .gap(4)
                               .items_center()
                               .rounded(6)
+                              .cursor_pointer()
                               .hover(s => s.bg(t.hover))
-                              .tooltip(`${st.ref}\n${st.message}\n${st.relDate}`)
+                              .tooltip(`${st.ref}\n${st.message}\n${st.relDate}\nClick: inspect stash · Ctrl+Click: open in new tab`)
+                              .on_click((e, cx) => {
+                                const stashCommit = {
+                                  hash: st.ref,
+                                  shortHash: st.ref,
+                                  subject: st.message,
+                                  author: "stash",
+                                  relDate: st.relDate,
+                                  date: "",
+                                  stash: st.ref,
+                                  refs: [],
+                                };
+                                if (e?.modifiers?.control || e?.modifiers?.platform) {
+                                  this.openCommitInNewTab(stashCommit);
+                                } else {
+                                  this.openCommit(stashCommit, cx);
+                                }
+                              })
                               .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.foreground).child(st.message))
                               .child(this.actionBtn(t, `st-apply-${st.ref}`, "Apply", "Apply stash (keep in list)", (_e, cx) => this.stashApply(st.ref, cx)))
                               .child(this.actionBtn(t, `st-pop-${st.ref}`, "Pop", "Pop stash (apply & remove)", (_e, cx) => this.stashPop(st.ref, cx)))
@@ -2508,9 +3275,10 @@ export default class ChangesHistory extends View {
                   ),
               );
           })
-          // Inline Diff preview when a file is clicked
-          .when(Boolean(this.open), diffArea =>
-            diffArea.child(
+          .when(Boolean(this.open), diffArea => {
+            const openFile = (this.open.staged ? this.staged : [...this.unstaged, ...this.conflicts]).find(f => f.path === this.open.path) ?? this.open;
+            const showHunkBadges = this.canActOnHunks(openFile);
+            return diffArea.child(
               v_flex()
                 .flex_1()
                 .min_h(120)
@@ -2530,38 +3298,24 @@ export default class ChangesHistory extends View {
                     .child(this.actionBtn(t, "sc-diff-open", "↗", "Open in viewer", (e) => this.openInViewer(this.open.path, e)))
                     .child(this.actionBtn(t, "sc-diff-x", "×", "Close diff", (_e, cx) => { this.open = null; this.setLines([]); cx.notify(); })),
                 )
+                .when(showHunkBadges, el => el.child(this.renderHunkBar(openFile, t, "inl")))
                 .child(
-                  div()
-                    .flex_1()
-                    .min_h(0)
-                    .relative()
-                    .font_family(settings().font_family ?? "JetBrains Mono")
-                    .text_size(size)
-                    .child(
-                      div()
-                        .id("changes-diff-x")
-                        .size_full()
-                        .overflow_x_scrollbar()
-                        .child(
-                          div()
-                            .w_full()
-                            .min_w(Math.max(300, this.longest * charWidth(size) + this.gutter(this.gutterChars, size) + 20))
-                            .h_full()
-                            .child(
-                              v_virtual_list(
-                                "changes-diff",
-                                this.rows.length,
-                                rowHeight(size),
-                                (i) => String(i),
-                                (range) => this.rows.slice(range.start, range.end).map((row) => this.diffRow(row, t, size, this.gutterChars)),
-                              ).size_full(),
-                            ),
-                        ),
-                    )
-                    .child(Scrollbar.vertical("changes-diff").viewport_from_layout().absolute().inset_0()),
+                  this.renderVirtualizedDiff({
+                    listId: "changes-diff",
+                    xId: "changes-diff-x",
+                    rows: this.rows,
+                    longest: this.longest,
+                    gutterChars: this.gutterChars,
+                    size,
+                    t,
+                    scrollHandle: this.diffScroll,
+                    overviewBuckets: this.overviewBuckets,
+                    showHunkBadges,
+                    selectHunks: true,
+                  }),
                 ),
-            ),
-          ),
+            );
+          }),
       );
   }
 }

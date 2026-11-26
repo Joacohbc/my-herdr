@@ -8,7 +8,7 @@ This file holds the rules an agent must follow. Detailed documentation lives in 
 
 | Need | Read |
 | --- | --- |
-| Layout tree, `shared` contracts, RAM/GC lifecycle, decisions D1–D12 | `.docs/architecture.md` |
+| Layout tree, `shared` contracts, RAM/GC lifecycle, decisions D1–D23 | `.docs/architecture.md` |
 | Every custom mod, interactions, limits, scripts | `.docs/mods-catalog.md` |
 | Domain vocabulary (ubiquitous language) | `.docs/context.md` |
 | GPUI runtime restrictions, `hbc-code-design`, language rules | `.docs/code-conventions.md` |
@@ -44,7 +44,7 @@ node scripts/build-icons.js
 ## Architecture in five lines
 
 - `layouts/my-herdr.json` and `mods/*` are symlinked into `~/.config/herdr-app/`; shipped Herdr files are never touched.
-- Mods run in isolated GPUI JS sandboxes and communicate solely via `shared()`/`setShared()` (`file-viewer.{open,meta,cmd}`, `changes.badge`, `herdr.gc`) and `run()`.
+- Mods run in isolated GPUI JS sandboxes and communicate solely via `shared()`/`setShared()` (`file-viewer.{open,meta,cmd}`, `changes.{badge,diff.open,refresh}`, `herdr.gc`) and `run()`.
 - Right-side panels (`files-search`, `changes-history`) cancel `watchFolder` on hide and evict caches/icon maps after 30 s; background viewer/diff tabs hibernate after 45 s unless dirty (`*`).
 - Sidebar blocks `docker-monitor` (containers + CPU/RAM) and `ai-usage` (Claude/Antigravity quota via `claude -p /usage` and `agy -p /usage`, top models via `collect.mjs`; Node/CLIs from `ai-usage.json` or `which`) join the push-resize `STACK`.
 - `system-monitor` attributes deep `pid`/`ppid` process trees, purges finished `herdr-core` terminals (`hc rm`) every 60 s, and broadcasts `herdr.gc` under high RAM (`>= 75%`) or on manual `GC`.
@@ -55,7 +55,7 @@ node scripts/build-icons.js
 - **Clones only**: customize via `layouts/my-herdr.json` and custom mods (`mod.clone`), keeping `install.sh` in sync.
 - **GPUI safety**: guard side effects with `checking()`, read props via `(initialProps && Object.keys(initialProps).length ? initialProps : null) ?? props()`, apply `settings().font_family ?? settings().font` at each mod root, and release `EditorState`, `InputState`, `watchFolder`, temp files, and icon caches in `close()`.
 - **No render-phase mutations**: never call `cx.notify()` synchronously or `EditorState.new(...)` during `render()`; defer via `cx.spawn(async cx => { await cx.sleep(0); ... })`.
-- **Bounded RAM & dirty safety**: every cache/history must have an explicit upper bound and eviction policy; never hibernate a tab while `isDirty()` is true; require explicit confirmation before destructive git actions (`Discard`, `Delete untracked`, `Drop stash`).
+- **Bounded RAM & dirty safety**: every cache/history must have an explicit upper bound and eviction policy; never hibernate a tab while `isDirty()` is true; require explicit confirmation before destructive git actions (`Discard`, `Delete untracked`, `Drop stash`, `Revert block`, `Clear stashes`, `Amend pushed HEAD`).
 - **Validation**: every mod edit must pass `herdr-app check`, live reload (`layout.switch` or `touch -h`), and `herdr-app status` (`"errors": []`); visual UI changes must also be inspected via `herdr-app shot`.
 - **Docs**: update the owning `.docs/` file and `.docs/context.md` in the same commit; delete completed items from `.docs/roadmap.md`.
 
