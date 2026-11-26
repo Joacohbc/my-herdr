@@ -1,6 +1,8 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, ScrollHandle } from "gpui-base";
-import { spaces, panes, run, openOverlay, theme, window, shared, layout, settings } from "herdr";
+import { spaces, panes, run, openOverlay, theme, window, shared, setShared, layout, settings, checking } from "herdr";
+
+const MAX_SWITCHER_MRU = 24;
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -31,9 +33,32 @@ export default class Tabs extends View {
   init() {
     this.pressed = null;
     this.scroll = ScrollHandle.new();
+    this.lastMruKey = null;
     try { this.panels = JSON.parse(localStorage.getItem("panels") ?? "{}"); } catch { this.panels = {}; }
     if (!this.panels || typeof this.panels !== "object" || Array.isArray(this.panels)) this.panels = {};
     this.swipe = { acc: 0, steps: 0, at: 0, last: 0 };
+  }
+
+  recordMru(space, activeTab, allSpaces, cx) {
+    if (checking() || !space?.id || !activeTab?.id) return;
+    const key = `${space.id}::${activeTab.id}`;
+    if (key === this.lastMruKey) return;
+    this.lastMruKey = key;
+
+    const validTabs = new Set();
+    for (const s of allSpaces) {
+      for (const tab of s.tabs ?? []) validTabs.add(`${s.id}::${tab.id}`);
+    }
+    const entry = { space: space.id, tab: activeTab.id, at: Date.now() };
+
+    cx.spawn(async () => {
+      await cx.sleep(0);
+      const prev = Array.isArray(shared("switcher.mru")) ? shared("switcher.mru") : [];
+      const filtered = prev.filter(
+        item => item?.space && item?.tab && `${item.space}::${item.tab}` !== key && validTabs.has(`${item.space}::${item.tab}`),
+      );
+      setShared("switcher.mru", [entry, ...filtered].slice(0, MAX_SWITCHER_MRU));
+    });
   }
 
   // One tab per wheel notch. A touchpad or smooth-scrolling mouse sends many
@@ -87,12 +112,14 @@ export default class Tabs extends View {
     localStorage.setItem("panels", JSON.stringify(this.panels));
   }
 
-  render() {
+  render(cx) {
     const t = theme();
-    const space = spaces().find(p => p.active);
+    const allSpaces = spaces();
+    const space = allSpaces.find(p => p.active);
     const shown = space?.tabs ?? [];
     const active = shown.findIndex(tab => tab.active);
     const selected = shown[active]?.id;
+    this.recordMru(space, shown[active], allSpaces, cx);
     if (selected !== this.selected || active !== this.selectedIndex) {
       this.selected = selected;
       this.selectedIndex = active;

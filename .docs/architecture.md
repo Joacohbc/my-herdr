@@ -45,6 +45,7 @@ Los mods de Herdr corren en contextos aislados dentro de `gpui-shell` y se comun
 | `tiling.closedPanes` / `tiling.closedTabs` | `pane-custom` | `pane-custom` | Pilas acotadas a 8 elementos deduplicados para `pane-custom.reopen_pane` y `pane-custom.reopen_tab` (`Ctrl + Shift + T`). |
 | `files-search.refresh` | `command-palette` | `files-search` | `{ seq, expand, root, on }`. Notifica al árbol de `Files` tras crear un archivo/carpeta para refrescar y expandir automáticamente la ruta padre. |
 | `command-palette.recent` | `command-palette` | `command-palette` | Historial acotado (máx. `10`) de comandos ejecutados recientemente mediante el prefijo `>`. |
+| `switcher.mru` | `tabs-custom` | `command-palette` | Historial MRU acotado (máx. `24`) de pares `{ space, tab, at }` visitados para el conmutador estilo *Alt-Tab* en `Ctrl + Shift + P`. |
 
 ---
 
@@ -64,7 +65,7 @@ Cada mod gestiona su memoria en tres capas complementarias:
 
 ---
 
-## 4. Decisiones de Arquitectura (`D1`–`D19`)
+## 4. Decisiones de Arquitectura (`D1`–`D21`)
 
 | ID | Decisión | Alternativa descartada y motivo |
 | --- | --- | --- |
@@ -88,3 +89,4 @@ Cada mod gestiona su memoria en tres capas complementarias:
 | **D18** | Montar `docker-monitor` y `ai-usage` como bloques `docker` y `usage` al final de `sidebar-lists` (en `px`, mínimo `64`), con modo compacto/colapsado, *resize por empuje* (`STACK` ampliado en las 5 copias de `stack-resize.js`) y filas Docker de una línea (nombre, CPU, RAM) que se expanden al pasar el mouse. | Como hijos del stack derecho `panel-body` quedaban ocultos tras un botón y competían con `Files`/`Changes`; el usuario quiere verlos siempre junto a `system-monitor` y `ports-monitor`. El colapso reduce el muestreo para acotar el costo de mantenerlos visibles. |
 | **D19** | Agregar el uso de IA en `mods/ai-usage/collect.mjs` (Node resuelto desde `ai-usage.json` → `command -v` → `$SHELL -ic 'which …'`) con caché incremental en `data/ai-usage/`, y obtener las cuotas con los comandos locales `claude -p /usage --no-session-persistence` y `agy -p /usage --output-format json`. | Leer ~200 MB de JSONL o abrir SQLite dentro del sandbox GPUI disparaba la RAM del mod y el runtime no tiene `node:sqlite`. El endpoint OAuth no documentado (`api/oauth/usage`) exigía leer el token de `~/.claude/.credentials.json`; los CLIs oficiales responden sin turno de modelo (0 tokens). `claude /usage` solo entrega texto, por lo que su parser puede romperse si cambia el formato: ante error se muestran las estimaciones locales. |
 | **D20** | Ajustar el stack del sidebar al alto de la ventana con `fitStackToViewport()` (en `stack-resize.js`): lee `globalThis.window.viewport_size()` de GPUI; al expandir, el bloque se limita al espacio libre sin tocar a los demás, y solo si no entra su mínimo (o la ventana se achicó, revisado cada 1 s desde `ai-usage`) se achican vecinos de abajo hacia arriba hasta `MINS`. | Con cinco bloques en `px` fijos, expandirlos todos superaba el alto del sidebar y `docker`/`usage` quedaban fuera de pantalla. La primera versión achicaba a los vecinos al expandir y nunca los restauraba, aplastando `agents`/`system` y recortando su vista rail; limitar al bloque que crece preserva las alturas elegidas por el usuario. `window()` de herdr no expone dimensiones y el `window` importado oculta al global de GPUI. |
+| **D21** | Integrar el conmutador estilo *Alt-Tab* de Spaces y Tabs dentro de `mods/command-palette/` (`Ctrl + Shift + P`, en modo unificado y en modo dedicado `@`) respaldado por un historial MRU acotado (`shared("switcher.mru")`, máx. `24`) registrado de forma diferida desde `tabs-custom`. | Mantener un segundo overlay independiente duplicaría la UI de búsqueda y los atajos; `command-palette` es efímero (`"place": "none"`), por lo que no puede rastrear cambios de foco en reposo, mientras que `tabs-custom` permanece siempre montado y actualiza el MRU con `cx.spawn` + `cx.sleep(0)` sin timers ni mutaciones síncronas en `render()`. |

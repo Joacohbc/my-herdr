@@ -1,5 +1,5 @@
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex, Input, InputState } from "gpui-base";
+import { v_flex, h_flex, Input, InputState, ScrollHandle } from "gpui-base";
 import {
   props,
   theme,
@@ -20,6 +20,8 @@ import {
   runCommandInTerminal,
   openAliasesInViewer,
   buildCommandList,
+  buildSwitchItems,
+  switchToTarget,
 } from "./actions.js";
 
 const ROW_HEIGHT = 42;
@@ -41,8 +43,11 @@ export default class CommandPalette extends View {
     this.root = p?.root || loc.cwd || "";
     this.on = p?.on !== undefined ? p.on : loc.on;
     this.baseDir = p?.baseDir || "";
-    this.mode = p?.mode === "runner" ? "palette" : (p?.mode || "palette");
+    this.mode = p?.mode === "runner" || p?.mode === "switcher" ? "palette" : (p?.mode || "palette");
     this.runnerActive = p?.mode === "runner";
+    this.switcherActive = p?.mode === "switcher";
+    this.switchFilter = "all";
+    this.listScroll = ScrollHandle.new();
 
     this.query = "";
     this.selected = 0;
@@ -65,12 +70,12 @@ export default class CommandPalette extends View {
     this.aliasFormError = null;
 
     this.searchInput = InputState.new({
-      placeholder: "Type a command or > to run in terminal…",
+      placeholder: "Switch space/tab, run command, @ switch, > terminal…",
       value: this.query,
     });
     this.searchInput.on("change", (_e, cx) => {
       const val = this.searchInput.value();
-      if (!this.runnerActive && val.startsWith(">")) {
+      if (!this.runnerActive && !this.switcherActive && val.startsWith(">")) {
         const rest = val.slice(1).trimStart();
         this.runnerActive = true;
         this.query = rest;
@@ -79,8 +84,18 @@ export default class CommandPalette extends View {
         cx.notify();
         return;
       }
+      if (!this.runnerActive && !this.switcherActive && val.startsWith("@")) {
+        const rest = val.slice(1).trimStart();
+        this.switcherActive = true;
+        this.query = rest;
+        this.selected = 0;
+        this.searchInput.set_value(rest);
+        cx.notify();
+        return;
+      }
       this.query = val;
       this.selected = 0;
+      this.listScroll?.scroll_to_item(0);
       cx.notify();
     });
     this.searchInput.on("submit", (_e, cx) => this.executeSelected(false, cx));
@@ -136,11 +151,15 @@ export default class CommandPalette extends View {
         try { input.release(); } catch {}
       }
     }
+    if (this.listScroll) {
+      try { this.listScroll.release(); } catch {}
+    }
     this.searchInput = null;
     this.fsInput = null;
     this.aliasNameInput = null;
     this.aliasCmdInput = null;
     this.aliasDescInput = null;
+    this.listScroll = null;
   }
 
   dismiss() {
@@ -163,11 +182,25 @@ export default class CommandPalette extends View {
     return this.mode === "palette" && this.runnerActive;
   }
 
+  isSwitcherQuery() {
+    return this.mode === "palette" && this.switcherActive;
+  }
+
   runnerRawText() {
     return this.query.trim();
   }
 
   visibleItems() {
+    if (this.isSwitcherQuery()) {
+      const q = this.query.trim().toLowerCase();
+      const switchItems = buildSwitchItems().filter(item => {
+        if (this.switchFilter === "tabs" && item.kind !== "switch-tab") return false;
+        if (this.switchFilter === "spaces" && item.kind !== "switch-space") return false;
+        return matchesQuery(item, q);
+      });
+      return switchItems.slice(0, MAX_VISIBLE_ROWS);
+    }
+
     if (this.isRunnerQuery()) {
       const raw = this.runnerRawText();
       const lower = raw.toLowerCase();
@@ -220,7 +253,9 @@ export default class CommandPalette extends View {
     }
 
     const q = this.query.trim().toLowerCase();
-    return this.commands.filter(c => matchesQuery(c, q)).slice(0, MAX_VISIBLE_ROWS);
+    const matchedSwitches = buildSwitchItems().filter(item => matchesQuery(item, q));
+    const matchedCommands = this.commands.filter(c => matchesQuery(c, q));
+    return [...matchedSwitches, ...matchedCommands].slice(0, MAX_VISIBLE_ROWS);
   }
 
   switchMode(mode, cx) {
@@ -238,9 +273,11 @@ export default class CommandPalette extends View {
   enterRunnerMode(cx) {
     this.mode = "palette";
     this.runnerActive = true;
+    this.switcherActive = false;
     this.query = "";
     this.searchInput?.set_value("");
     this.selected = 0;
+    this.listScroll?.scroll_to_item(0);
     this.focusActiveInput();
     cx.notify();
   }
@@ -248,12 +285,39 @@ export default class CommandPalette extends View {
   exitRunnerMode(cx) {
     this.runnerActive = false;
     this.selected = 0;
+    this.listScroll?.scroll_to_item(0);
+    this.focusActiveInput();
+    cx.notify();
+  }
+
+  enterSwitcherMode(cx) {
+    this.mode = "palette";
+    this.switcherActive = true;
+    this.runnerActive = false;
+    this.query = "";
+    this.searchInput?.set_value("");
+    this.selected = 0;
+    this.listScroll?.scroll_to_item(0);
+    this.focusActiveInput();
+    cx.notify();
+  }
+
+  exitSwitcherMode(cx) {
+    this.switcherActive = false;
+    this.selected = 0;
+    this.listScroll?.scroll_to_item(0);
     this.focusActiveInput();
     cx.notify();
   }
 
   executeItem(item, forceSplitRight, cx) {
     if (!item) return;
+
+    if (item.kind === "switch-space" || item.kind === "switch-tab") {
+      this.dismiss();
+      switchToTarget(item);
+      return;
+    }
 
     if (item.kind === "alias") {
       const place = forceSplitRight ? "right" : item.alias.place;
@@ -288,6 +352,10 @@ export default class CommandPalette extends View {
     }
     if (act.kind === "enter-runner") {
       this.enterRunnerMode(cx);
+      return;
+    }
+    if (act.kind === "enter-switcher") {
+      this.enterSwitcherMode(cx);
       return;
     }
     if (act.kind === "edit-aliases") {
@@ -690,6 +758,7 @@ export default class CommandPalette extends View {
     }
 
     const runner = this.isRunnerQuery();
+    const switcher = this.isSwitcherQuery();
     const items = this.visibleItems();
     const safeIdx = Math.min(this.selected, Math.max(0, items.length - 1));
     this.selected = safeIdx;
@@ -712,19 +781,28 @@ export default class CommandPalette extends View {
           this.dismiss();
           return;
         }
-        if (k === "backspace" && runner && this.query === "") {
-          cx.stop_propagation();
-          this.exitRunnerMode(cx);
-          return;
+        if (k === "backspace" && this.query === "") {
+          if (runner) {
+            cx.stop_propagation();
+            this.exitRunnerMode(cx);
+            return;
+          }
+          if (switcher) {
+            cx.stop_propagation();
+            this.exitSwitcherMode(cx);
+            return;
+          }
         }
-        if (k === "down" && items.length) {
+        if ((k === "down" || (k === "tab" && !e.modifiers?.shift)) && items.length) {
           this.selected = (this.selected + 1) % items.length;
+          this.listScroll?.scroll_to_item(this.selected);
           cx.stop_propagation();
           cx.notify();
           return;
         }
-        if (k === "up" && items.length) {
+        if ((k === "up" || (k === "tab" && e.modifiers?.shift)) && items.length) {
           this.selected = (this.selected + items.length - 1) % items.length;
+          this.listScroll?.scroll_to_item(this.selected);
           cx.stop_propagation();
           cx.notify();
           return;
@@ -751,20 +829,43 @@ export default class CommandPalette extends View {
               .px(6)
               .py(2)
               .rounded(4)
-              .bg(runner ? t.selected : t.surface)
+              .bg(runner || switcher ? t.selected : t.surface)
               .text_size(11.5)
               .font_bold()
-              .text_color(runner ? t.accent : t.dim)
-              .when(runner, el =>
+              .text_color(runner || switcher ? t.accent : t.dim)
+              .when(runner || switcher, el =>
                 el
                   .cursor_pointer()
-                  .tooltip("Exit terminal mode (Backspace)")
+                  .tooltip(runner ? "Exit terminal mode (Backspace)" : "Exit switch mode (Backspace)")
                   .hover(s => s.bg(t.hover))
-                  .on_click((_e, cx) => this.exitRunnerMode(cx)),
+                  .on_click((_e, cx) => (runner ? this.exitRunnerMode(cx) : this.exitSwitcherMode(cx))),
               )
-              .child(runner ? ">_" : "⌘"),
+              .child(runner ? ">_" : switcher ? "⇄" : "⌘"),
           )
           .child(Input.new(this.searchInput).flex_1().h_full().text_size(13).text_color(t.foreground))
+          .child(
+            div()
+              .id("cp-switch-toggle")
+              .px(7)
+              .py(3)
+              .rounded(5)
+              .bg(switcher ? t.selected : t.surface)
+              .text_size(11)
+              .font_medium()
+              .text_color(switcher ? t.accent : t.muted)
+              .cursor_pointer()
+              .hover(s => s.bg(t.hover).text_color(t.foreground))
+              .on_click((_e, cx) => {
+                if (switcher) {
+                  this.query = "";
+                  this.searchInput?.set_value("");
+                  this.exitSwitcherMode(cx);
+                } else {
+                  this.enterSwitcherMode(cx);
+                }
+              })
+              .child(switcher ? "All" : "⇄ Switch"),
+          )
           .child(
             div()
               .id("cp-mode-toggle")
@@ -786,8 +887,19 @@ export default class CommandPalette extends View {
                   this.enterRunnerMode(cx);
                 }
               })
-              .child(runner ? "Commands" : "> Run"),
+              .child(runner ? "All" : "> Run"),
           ),
+      )
+      .when(switcher, el =>
+        el.child(
+          h_flex()
+            .flex_none()
+            .items_center()
+            .gap(6)
+            .child(this.chip("cp-sw-all", "All", this.switchFilter === "all", (_e, cx) => { this.switchFilter = "all"; this.selected = 0; cx.notify(); }, t))
+            .child(this.chip("cp-sw-tabs", "Tabs", this.switchFilter === "tabs", (_e, cx) => { this.switchFilter = "tabs"; this.selected = 0; cx.notify(); }, t))
+            .child(this.chip("cp-sw-spaces", "Spaces", this.switchFilter === "spaces", (_e, cx) => { this.switchFilter = "spaces"; this.selected = 0; cx.notify(); }, t)),
+        ),
       )
       .when(runner, el =>
         el.child(
@@ -812,11 +924,13 @@ export default class CommandPalette extends View {
           .h(listHeight)
           .flex_none()
           .overflow_y_scrollbar()
+          .track_scroll(this.listScroll)
           .gap(2)
           .children(
             items.length
               ? items.map((item, idx) => {
                   const isSel = idx === safeIdx;
+                  const statusTone = item.status && t[item.status] ? t[item.status] : null;
                   return h_flex()
                     .id(`cp-item-${idx}-${item.id}`)
                     .h(ROW_HEIGHT)
@@ -847,12 +961,21 @@ export default class CommandPalette extends View {
                         .min_w(0)
                         .gap(1)
                         .child(
-                          div()
-                            .truncate()
-                            .text_size(12.5)
-                            .font_medium()
-                            .text_color(isSel ? t.foreground : t.foreground)
-                            .child(item.title),
+                          h_flex()
+                            .items_center()
+                            .gap(6)
+                            .min_w(0)
+                            .child(
+                              div()
+                                .truncate()
+                                .text_size(12.5)
+                                .font_medium()
+                                .text_color(t.foreground)
+                                .child(item.title),
+                            )
+                            .when(Boolean(statusTone && (item.status === "working" || item.status === "blocked" || item.status === "done")), dot =>
+                              dot.child(div().size(6).flex_none().rounded(3).bg(statusTone)),
+                            ),
                         )
                         .when(Boolean(item.subtitle), sub =>
                           sub.child(
@@ -871,11 +994,11 @@ export default class CommandPalette extends View {
                           .py(2)
                           .flex_none()
                           .rounded(4)
-                          .bg(t.surface)
+                          .bg(item.isLast ? t.selected : t.surface)
                           .border_1()
-                          .border_color(t.border)
+                          .border_color(item.isLast ? t.accent : t.border)
                           .text_size(10.5)
-                          .text_color(t.muted)
+                          .text_color(item.isLast ? t.accent : t.muted)
                           .child(item.shortcut),
                       ),
                     );
@@ -885,7 +1008,13 @@ export default class CommandPalette extends View {
                     .p(14)
                     .text_size(12)
                     .text_color(t.dim)
-                    .child(runner ? "Type a shell command after > and press Enter" : "No matching commands"),
+                    .child(
+                      runner
+                        ? "Type a shell command after > and press Enter"
+                        : switcher
+                          ? "No matching spaces or tabs"
+                          : "No matching spaces, tabs, or commands",
+                    ),
                 ],
           ),
       )
@@ -899,7 +1028,13 @@ export default class CommandPalette extends View {
           .justify_between()
           .text_size(11)
           .text_color(t.dim)
-          .child(runner ? "Enter: run · Shift+Enter: split right · Backspace (empty): exit" : "↑↓: navigate · Enter: run · Type > for terminal commands")
+          .child(
+            runner
+              ? "Enter: run · Shift+Enter: split right · Backspace (empty): exit"
+              : switcher
+                ? "↑↓ / Tab: select · Enter: switch · Backspace (empty): exit"
+                : "↑↓ / Tab: navigate · Enter: switch/run · @ switch · > terminal",
+          )
           .child(this.root ? this.root.split(/[\\/]/).pop() : ""),
       );
   }

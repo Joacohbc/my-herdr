@@ -210,7 +210,157 @@ function buildKeyMap() {
   return map;
 }
 
+const CLEAN_TITLE = /^[^\p{L}\p{N}\p{Ps}\p{Pi}]+/u;
+const PATH_LIKE = /^[~/]|^[A-Za-z]:\\/;
+
+function cleanTitle(value) {
+  return (value ?? "").replace(CLEAN_TITLE, "").replace(/^\[ [!.] \] /, "").trim();
+}
+
+function resolveTabLabel(tab, lead) {
+  const prog = lead?.program?.name;
+  const base = tab.named ? tab.name : (prog ?? `Tab ${tab.index}`);
+  if (!lead?.program?.agent) return base;
+  const live = cleanTitle(lead.title);
+  const rawWithoutGlyph = (lead.title ?? "").replace(/^[^\p{L}\p{N}~/]+/u, "");
+  const isPath = PATH_LIKE.test(rawWithoutGlyph);
+  const isTelling = live && live !== lead.terminal && live !== prog && !isPath && !live.includes("@") && live.toLowerCase() !== lead.program.key;
+  return (tab.name === prog || !tab.named) && isTelling ? live : base;
+}
+
+function folderTail(path) {
+  if (!path) return "";
+  const trimmed = path.replace(/\/+$/, "");
+  return trimmed.split("/").pop() || trimmed;
+}
+
+export function buildSwitchItems() {
+  const allSpaces = spaces() ?? [];
+  const allPanes = panes() ?? [];
+  const mru = Array.isArray(shared("switcher.mru")) ? shared("switcher.mru") : [];
+
+  const tabRank = new Map();
+  const spaceRank = new Map();
+  mru.forEach((entry, idx) => {
+    if (!entry?.space || !entry?.tab) return;
+    const key = `${entry.space}::${entry.tab}`;
+    if (!tabRank.has(key)) tabRank.set(key, idx);
+    if (!spaceRank.has(entry.space)) spaceRank.set(entry.space, idx);
+  });
+
+  const panesByTab = new Map();
+  for (const pane of allPanes) {
+    if (!pane?.tab) continue;
+    let list = panesByTab.get(pane.tab);
+    if (!list) {
+      list = [];
+      panesByTab.set(pane.tab, list);
+    }
+    list.push(pane);
+  }
+
+  const items = [];
+  for (const space of allSpaces) {
+    const tabs = space.tabs ?? [];
+    const sRank = spaceRank.has(space.id) ? spaceRank.get(space.id) : Infinity;
+
+    for (const tab of tabs) {
+      const tabPanes = panesByTab.get(tab.id) ?? [];
+      const lead = tabPanes.find(p => p.program?.agent) ?? tabPanes[0] ?? null;
+      const title = resolveTabLabel(tab, lead);
+      const progName = lead?.program?.name ?? "";
+      const cwdName = folderTail(lead?.cwd);
+      const subParts = [space.name];
+      if (space.machine) subParts.push(space.machine);
+      if (progName && progName.toLowerCase() !== title.toLowerCase()) subParts.push(progName);
+      if (tab.panes > 1) subParts.push(`${tab.panes} panes`);
+      if (cwdName && cwdName.toLowerCase() !== space.name.toLowerCase()) subParts.push(cwdName);
+
+      const isCurrent = Boolean(space.active && tab.active);
+      const key = `${space.id}::${tab.id}`;
+      const rank = tabRank.has(key) ? tabRank.get(key) : Infinity;
+
+      items.push({
+        id: `switch-tab:${space.id}:${tab.id}`,
+        kind: "switch-tab",
+        group: "Tab",
+        title,
+        subtitle: subParts.join(" · "),
+        words: `${space.name} ${space.branch || ""} ${space.folder || ""} ${space.machine || ""} ${tab.name} ${title} ${progName} ${lead?.title || ""} ${lead?.cwd || ""} tab`,
+        shortcut: isCurrent ? "Current" : (space.active ? `Tab ${tab.index}` : `S${space.index}·T${tab.index}`),
+        spaceId: space.id,
+        tabId: tab.id,
+        status: tab.status ?? null,
+        isCurrent,
+        mruRank: rank,
+        order: space.index * 1000 + tab.index,
+      });
+    }
+
+    const tabCount = tabs.length;
+    const spaceSubParts = [`${tabCount} ${tabCount === 1 ? "tab" : "tabs"}`];
+    if (space.branch) spaceSubParts.push(space.branch);
+    if (space.machine) spaceSubParts.push(space.machine);
+    const tail = folderTail(space.folder);
+    if (tail && tail.toLowerCase() !== space.name.toLowerCase()) spaceSubParts.push(tail);
+
+    items.push({
+      id: `switch-space:${space.id}`,
+      kind: "switch-space",
+      group: "Space",
+      title: space.name,
+      subtitle: spaceSubParts.join(" · "),
+      words: `${space.name} ${space.branch || ""} ${space.folder || ""} ${space.machine || ""} space`,
+      shortcut: space.active ? "Current" : `Space ${space.index}`,
+      spaceId: space.id,
+      tabId: null,
+      status: space.status ?? null,
+      isCurrent: Boolean(space.active),
+      mruRank: sRank,
+      order: space.index * 1000 + 999,
+    });
+  }
+
+  items.sort((a, b) => {
+    if (a.isCurrent !== b.isCurrent) return a.isCurrent ? 1 : -1;
+    if (a.mruRank !== b.mruRank) return a.mruRank - b.mruRank;
+    if (a.kind !== b.kind) return a.kind === "switch-tab" ? -1 : 1;
+    return a.order - b.order;
+  });
+
+  const firstMru = items.find(item => !item.isCurrent && item.mruRank < Infinity);
+  if (firstMru) {
+    firstMru.shortcut = "Last";
+    firstMru.isLast = true;
+  }
+
+  return items;
+}
+
+export function switchToTarget(item) {
+  if (!item?.spaceId) return;
+  if (item.kind === "switch-space") {
+    run("space.select", { id: item.spaceId });
+    return;
+  }
+  if (item.kind === "switch-tab" && item.tabId) {
+    const targetSpace = (spaces() ?? []).find(s => s.id === item.spaceId);
+    if (targetSpace && !targetSpace.active) {
+      run("space.select", { id: item.spaceId });
+    }
+    run("tab.select", { id: item.tabId });
+  }
+}
+
 const CUSTOM_COMMANDS = [
+  {
+    id: "custom:switch-space-tab",
+    group: "Switch",
+    title: "Switch Space / Tab (@)",
+    subtitle: "Jump between open spaces and tabs in recent (Alt-Tab) order",
+    words: "switch space tab alt-tab jump window workspace @",
+    action: { kind: "enter-switcher" },
+  },
   {
     id: "custom:web",
     group: "Web",

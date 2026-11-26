@@ -59,7 +59,7 @@ Encabezado unificado para todos los paneles del layout `my-herdr`.
 Clon personalizado de la barra de pestañas `tabs`.
 
 - **Archivos:** `main.js`, `mod.json`, `web.svg`, `win-close.svg`, `win-max.svg`, `win-min.svg`, `win-restore.svg`.
-- **Responsabilidades:** conserva el comportamiento nativo de pestañas, añade el botón `Web` (abre el popup `web-launcher`) y muestra un **badge circular flotante** en la esquina superior derecha del botón `Changes` leyendo `shared("changes.badge")`.
+- **Responsabilidades:** conserva el comportamiento nativo de pestañas, añade el botón `Web` (abre el popup `web-launcher`), muestra un **badge circular flotante** en la esquina superior derecha del botón `Changes` leyendo `shared("changes.badge")` y publica de forma diferida el historial MRU acotado (`shared("switcher.mru")`, máx. `24`) al cambiar de espacio o pestaña activa.
 
 ### 1.6 `system-monitor` (`mods/system-monitor/`)
 Monitor en vivo de CPU, RAM y árbol de procesos en la barra lateral izquierda + motor de limpieza automática.
@@ -100,11 +100,12 @@ Clon personalizado del panel `agents` de la barra lateral izquierda.
 - **Funcionalidades:** conserva agrupación/prioridad, sub-agentes y pines del mod nativo, hereda la fuente global (**D11**), añade un **modo compacto vertical** (al pulsar `Agents ▾` o achicar el panel a `< 86 px`, `min: 60 px`) con chips de estado, e incorpora un manejador superior de *resize por empuje* (**D17**) que preserva las alturas de los bloques vecinos contra `spaces`.
 
 ### 1.10 `command-palette` (`mods/command-palette/`)
-Paleta de comandos unificada (`Ctrl + Shift + P`), ejecutor de comandos en terminal con prefijo `>`, gestor de aliases configurables y diálogo de creación/edición rápida (`micro`/`nano`).
+Paleta de comandos unificada (`Ctrl + Shift + P`), conmutador rápido estilo *Alt-Tab* entre Spaces y Tabs (`@`), ejecutor de comandos en terminal con prefijo `>`, gestor de aliases configurables y diálogo de creación/edición rápida (`micro`/`nano`).
 
 - **Archivos:** `main.js`, `actions.js`, `mod.json` (`"place": "none"`, `"focusable": true`, popup superior `640×480`, cero RAM en reposo).
 - **Funcionalidades:**
-  - **Modo Comandos (por defecto):** reúne todos los comandos nativos de `commands()` con sus atajos reales de `keys()`, más acciones personalizadas de `my-herdr` (`Open Web Launcher`, `Create File`, `Create Folder`, `Quick Edit in Terminal (micro / nano)`, `Run Command (> )`, `Edit Command Aliases`, `Close tab`, `Reopen closed tab`).
+  - **Modo Unificado (por defecto):** muestra primero los Spaces y Tabs abiertos ordenados por uso reciente (`shared("switcher.mru")`, destacando el destino previo con el badge `Last` y el activo con `Current`) y debajo todos los comandos nativos de `commands()` con sus atajos reales de `keys()` más las acciones personalizadas de `my-herdr`. Permite recorrer con `↑`/`↓` o `Tab`/`Shift + Tab` (con auto-scroll mediante `ScrollHandle`) y saltar al Space o Tab con `Enter` (`space.select` + `tab.select`).
+  - **Modo Switch (`@` o `⇄ Switch`):** filtra únicamente Spaces y Tabs abiertos con chips rápidos `All | Tabs | Spaces`, mostrando nombre limpio de pestaña/agente, espacio, rama Git, máquina remota y punto de estado (`working`, `blocked`, `done`). `Backspace` en vacío vuelve al modo unificado.
   - **Modo Ejecutor (`>`):** al escribir `>` (o pulsar `> Run`), filtra aliases cargados de `~/.config/herdr-app/command-aliases.json` (máx. `100`) y comandos recientes (`shared("command-palette.recent")`, máx. `10`). Permite ejecutar comandos arbitrarios o aliases en una nueva terminal (`Enter` según destino configurado `Tab`/`Split →`, `Shift + Enter` en split derecho, toggle `Keep open` / `Auto-close`), añadir nuevos aliases inline (`+ Add Alias`) o abrir `command-aliases.json` en `file-viewer` (`Edit JSON`).
   - **Creación y edición rápida (`micro`/`nano`):** crea archivos o carpetas con soporte de rutas anidadas (`mkdir -p --`, argumentos posicionales `"$1"`, validación contra `..`, compatible con local y SSH) y autodetecta `micro` → `nano` → `vi` en la máquina destino para abrir el archivo directamente en terminal.
 
