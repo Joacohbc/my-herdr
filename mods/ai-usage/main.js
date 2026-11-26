@@ -342,8 +342,11 @@ export default class AiUsage extends View {
     } else if (this.data?.claude && this.data.claude.installed !== false) {
       parts.push(`5h ${formatCount(this.data.claude.window.messages)} msgs`);
     }
-    const gemini5h = this.data?.antigravity?.quota?.groups?.find(group => /gemini/i.test(group.name))?.windows.find(entry => entry.window === "5h");
+    const geminiWindows = this.data?.antigravity?.quota?.groups?.find(group => /gemini/i.test(group.name))?.windows ?? [];
+    const gemini5h = geminiWindows.find(entry => entry.window === "5h");
+    const geminiWeek = geminiWindows.find(entry => entry.window !== "5h");
     if (gemini5h) parts.push(`Gemini 5h ${Math.round(gemini5h.pct)}%`);
+    if (geminiWeek) parts.push(`wk ${Math.round(geminiWeek.pct)}%`);
     return parts.join(" · ");
   }
 
