@@ -84,12 +84,17 @@ export function fitHeights(heights, available, keepId) {
   return next;
 }
 
-// Resizes `ownId` to `px` (when given) and squeezes the rest so no block falls off the window.
+// Expands `ownId` to `px` but only into free space, so the user's other block heights are
+// kept; neighbours shrink (bottom-up) only when even `ownId`'s minimum does not fit, or
+// when the window itself got shorter (called without `ownId`).
 export function fitStackToViewport(ownId = null, px = null) {
   const tree = layout();
   const heights = snapshotHeights(tree, ownId, px ?? 0);
-  if (ownId && px !== null) heights[ownId] = px;
   const available = availableStackPx();
+  if (ownId && px !== null) {
+    const others = STACK.reduce((sum, id) => sum + (id === ownId ? 0 : heights[id]), 0);
+    heights[ownId] = available === null ? px : Math.max(MINS[ownId], Math.min(px, Math.floor(available - others)));
+  }
   const next = available === null ? heights : fitHeights(heights, available, ownId);
   for (const id of STACK) {
     const current = findNode(tree, id)?.size?.px;
