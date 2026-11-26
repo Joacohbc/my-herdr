@@ -26,6 +26,7 @@ import {
 
 const ROW_HEIGHT = 42;
 const MAX_VISIBLE_ROWS = 50;
+const SWITCH_FILTERS = ["all", "spaces", "tabs"];
 
 function matchesQuery(item, q) {
   if (!q) return true;
@@ -793,6 +794,16 @@ export default class CommandPalette extends View {
             return;
           }
         }
+        if (switcher && this.query === "" && (k === "left" || k === "right")) {
+          const idx = SWITCH_FILTERS.indexOf(this.switchFilter);
+          const delta = k === "right" ? 1 : -1;
+          this.switchFilter = SWITCH_FILTERS[(idx + delta + SWITCH_FILTERS.length) % SWITCH_FILTERS.length];
+          this.selected = 0;
+          this.listScroll?.scroll_to_item(0);
+          cx.stop_propagation();
+          cx.notify();
+          return;
+        }
         if ((k === "down" || (k === "tab" && !e.modifiers?.shift)) && items.length) {
           this.selected = (this.selected + 1) % items.length;
           this.listScroll?.scroll_to_item(this.selected);
@@ -840,7 +851,7 @@ export default class CommandPalette extends View {
                   .hover(s => s.bg(t.hover))
                   .on_click((_e, cx) => (runner ? this.exitRunnerMode(cx) : this.exitSwitcherMode(cx))),
               )
-              .child(runner ? ">_" : switcher ? "⇄" : "⌘"),
+              .child(runner ? ">_" : switcher ? "@" : "⌘"),
           )
           .child(Input.new(this.searchInput).flex_1().h_full().text_size(13).text_color(t.foreground))
           .child(
@@ -864,7 +875,7 @@ export default class CommandPalette extends View {
                   this.enterSwitcherMode(cx);
                 }
               })
-              .child(switcher ? "All" : "⇄ Switch"),
+              .child(switcher ? "All" : "@ Switch"),
           )
           .child(
             div()
@@ -897,8 +908,8 @@ export default class CommandPalette extends View {
             .items_center()
             .gap(6)
             .child(this.chip("cp-sw-all", "All", this.switchFilter === "all", (_e, cx) => { this.switchFilter = "all"; this.selected = 0; cx.notify(); }, t))
-            .child(this.chip("cp-sw-tabs", "Tabs", this.switchFilter === "tabs", (_e, cx) => { this.switchFilter = "tabs"; this.selected = 0; cx.notify(); }, t))
-            .child(this.chip("cp-sw-spaces", "Spaces", this.switchFilter === "spaces", (_e, cx) => { this.switchFilter = "spaces"; this.selected = 0; cx.notify(); }, t)),
+            .child(this.chip("cp-sw-spaces", "Spaces", this.switchFilter === "spaces", (_e, cx) => { this.switchFilter = "spaces"; this.selected = 0; cx.notify(); }, t))
+            .child(this.chip("cp-sw-tabs", "Tabs", this.switchFilter === "tabs", (_e, cx) => { this.switchFilter = "tabs"; this.selected = 0; cx.notify(); }, t)),
         ),
       )
       .when(runner, el =>
@@ -931,6 +942,8 @@ export default class CommandPalette extends View {
               ? items.map((item, idx) => {
                   const isSel = idx === safeIdx;
                   const statusTone = item.status && t[item.status] ? t[item.status] : null;
+                  const isSwitchItem = item.kind === "switch-tab" || item.kind === "switch-space";
+                  const badgeLabel = isSwitchItem && !switcher ? `@${item.group}` : (item.group || "Cmd");
                   return h_flex()
                     .id(`cp-item-${idx}-${item.id}`)
                     .h(ROW_HEIGHT)
@@ -953,7 +966,7 @@ export default class CommandPalette extends View {
                         .text_size(10.5)
                         .font_semibold()
                         .text_color(isSel ? t.accent : t.dim)
-                        .child(item.group || "Cmd"),
+                        .child(badgeLabel),
                     )
                     .child(
                       v_flex()
@@ -1032,7 +1045,7 @@ export default class CommandPalette extends View {
             runner
               ? "Enter: run · Shift+Enter: split right · Backspace (empty): exit"
               : switcher
-                ? "↑↓ / Tab: select · Enter: switch · Backspace (empty): exit"
+                ? "↑↓ / Tab: select · ←→: All/Spaces/Tabs · Enter: switch · Backspace: exit"
                 : "↑↓ / Tab: navigate · Enter: switch/run · @ switch · > terminal",
           )
           .child(this.root ? this.root.split(/[\\/]/).pop() : ""),
