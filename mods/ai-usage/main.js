@@ -19,6 +19,8 @@ const IDLE_EVICT_MS = 30_000;
 const UI_REFRESH_TICKS = 30;
 const TOP_MODELS_SHOWN = 4;
 const USAGE_ICON = "mods/ai-usage/icons/usage.svg";
+const CLAUDE_ICON = "mods/ai-usage/icons/claude.svg";
+const ANTIGRAVITY_ICON = "mods/ai-usage/icons/antigravity.svg";
 
 function isSidebarVisible() {
   if (window()?.visible === false) return false;
@@ -333,21 +335,30 @@ export default class AiUsage extends View {
     ], t);
   }
 
-  miniSummaryText() {
-    const quota = this.data?.claude?.quota;
+  miniSummaryParts() {
     const parts = [];
+    const claude = this.data?.claude;
+    const quota = claude?.quota;
+    const claudeTexts = [];
     if (hasQuota(quota)) {
-      if (quota.fiveHour) parts.push(`5h ${Math.round(quota.fiveHour.pct)}%`);
-      if (quota.sevenDay) parts.push(`wk ${Math.round(quota.sevenDay.pct)}%`);
-    } else if (this.data?.claude && this.data.claude.installed !== false) {
-      parts.push(`5h ${formatCount(this.data.claude.window.messages)} msgs`);
+      if (quota.fiveHour) claudeTexts.push(`5h ${Math.round(quota.fiveHour.pct)}%`);
+      if (quota.sevenDay) claudeTexts.push(`wk ${Math.round(quota.sevenDay.pct)}%`);
+    } else if (claude && claude.installed !== false) {
+      claudeTexts.push(`5h ${formatCount(claude.window.messages)} msgs`);
     }
+    if (claudeTexts.length) parts.push({ icon: CLAUDE_ICON, name: "Claude", text: claudeTexts.join(" · ") });
     const geminiWindows = this.data?.antigravity?.quota?.groups?.find(group => /gemini/i.test(group.name))?.windows ?? [];
     const gemini5h = geminiWindows.find(entry => entry.window === "5h");
     const geminiWeek = geminiWindows.find(entry => entry.window !== "5h");
-    if (gemini5h) parts.push(`Gemini 5h ${Math.round(gemini5h.pct)}%`);
-    if (geminiWeek) parts.push(`wk ${Math.round(geminiWeek.pct)}%`);
-    return parts.join(" · ");
+    const geminiTexts = [];
+    if (gemini5h) geminiTexts.push(`5h ${Math.round(gemini5h.pct)}%`);
+    if (geminiWeek) geminiTexts.push(`wk ${Math.round(geminiWeek.pct)}%`);
+    if (geminiTexts.length) parts.push({ icon: ANTIGRAVITY_ICON, name: "Antigravity", text: geminiTexts.join(" · ") });
+    return parts;
+  }
+
+  miniSummaryText() {
+    return this.miniSummaryParts().map(part => `${part.name} ${part.text}`).join(" · ");
   }
 
   renderHeader(t, isMini) {
@@ -393,14 +404,19 @@ export default class AiUsage extends View {
   }
 
   renderMiniSummary(t) {
-    const summary = this.data ? this.miniSummaryText() || "No Claude Code or Antigravity found" : null;
-    const text = summary ?? (this.nodeMissing ? "Node.js not found" : this.error ?? "Collecting usage…");
-    return h_flex()
-      .h(30)
-      .flex_none()
-      .px(10)
+    const parts = this.data ? this.miniSummaryParts() : [];
+    const row = h_flex().h(30).flex_none().px(10).gap(8).items_center().min_w(0).overflow_hidden();
+    if (parts.length > 0) {
+      return row.children(parts.map(part => h_flex()
+        .flex_none()
+        .items_center()
+        .gap(4)
+        .child(svg(part.icon).size(13).flex_none())
+        .child(div().text_size(11).text_color(t.foreground).child(part.text))));
+    }
+    const text = this.data ? "No Claude Code or Antigravity found" : this.nodeMissing ? "Node.js not found" : this.error ?? "Collecting usage…";
+    return row
       .gap(6)
-      .items_center()
       .child(svg(USAGE_ICON).size(15).flex_none().text_color(t.muted))
       .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(this.data ? t.foreground : this.error && !this.nodeMissing ? t.blocked : t.dim).child(text));
   }
