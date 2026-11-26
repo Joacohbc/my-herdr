@@ -9,6 +9,7 @@ const COLLAPSED_PX = 64;
 const DEFAULT_EXPANDED = 220;
 const EXPANDED_KEY = "usage.expandedPx";
 const COLLAPSED_KEY = "usage.collapsed";
+const OPEN_SECTIONS_KEY = "usage.openSections";
 const RAIL_WIDTH_PX = 140;
 const MINI_HEIGHT_PX = 96;
 const TICK_MS = 1_000;
@@ -45,7 +46,16 @@ function formatDuration(ms) {
 function quotaColor(pct, t) {
   if (pct >= 90) return t.ansi1;
   if (pct >= 70) return t.blocked;
-  return t.accent;
+  return t.ansi2;
+}
+
+function loadOpenSections() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(OPEN_SECTIONS_KEY) ?? "[]");
+    return new Set(Array.isArray(stored) ? stored.filter(key => key === "claude" || key === "antigravity") : []);
+  } catch {
+    return new Set();
+  }
 }
 
 function hasQuota(quota) {
@@ -63,6 +73,7 @@ export default class AiUsage extends View {
     this.hiddenSince = 0;
     this.ticks = 0;
     this.collapsed = localStorage.getItem(COLLAPSED_KEY) === "1";
+    this.openSections = loadOpenSections();
     this.width = 268;
     this.blockHeight = DEFAULT_EXPANDED;
     this.drag = null;
@@ -142,6 +153,13 @@ export default class AiUsage extends View {
     if (result.failedToStart) this.nodePath = null;
     this.error = result.error;
     if (result.data) this.data = result.data;
+  }
+
+  toggleSection(key, cx) {
+    if (this.openSections.has(key)) this.openSections.delete(key);
+    else this.openSections.add(key);
+    try { localStorage.setItem(OPEN_SECTIONS_KEY, JSON.stringify([...this.openSections])); } catch {}
+    cx.notify();
   }
 
   toggleCollapsed(cx) {
@@ -248,7 +266,8 @@ export default class AiUsage extends View {
     }));
   }
 
-  renderSection(title, subtitle, children, t) {
+  renderSection(key, title, subtitle, summary, details, t) {
+    const open = this.openSections.has(key);
     return v_flex()
       .flex_none()
       .px(10)
@@ -256,12 +275,17 @@ export default class AiUsage extends View {
       .gap(6)
       .child(
         h_flex()
+          .id(`usage-section-${key}`)
           .items_center()
           .gap(5)
+          .cursor_pointer()
+          .on_click((_e, cx) => this.toggleSection(key, cx))
+          .child(svg(`mods/ai-usage/icons/chevron-${open ? "down" : "right"}.svg`).size(11).flex_none().text_color(t.dim))
           .child(div().flex_1().text_size(11).font_semibold().text_color(t.foreground).child(title))
           .when(Boolean(subtitle), el => el.child(div().flex_none().text_size(9.5).text_color(t.dim).child(subtitle))),
       )
-      .children(children.filter(Boolean));
+      .children(summary.filter(Boolean))
+      .when(open, el => el.children(details.filter(Boolean)));
   }
 
   renderNote(text, color, t) {
@@ -280,8 +304,7 @@ export default class AiUsage extends View {
           quota.sevenDaySonnet && this.renderQuotaRow("Weekly Sonnet", quota.sevenDaySonnet, t),
         ]
       : [this.renderQuotaProblem(quota, "claude", t)];
-    return this.renderSection("Claude Code", quota?.plan ?? "", [
-      ...quotaRows,
+    return this.renderSection("claude", "Claude Code", quota?.plan ?? "", quotaRows, [
       this.renderNote(`5h block: ${formatCount(window5h.messages)} msgs · ${formatCount(window5h.tokens)} tok${blockReset}`, null, t),
       this.renderNote(`7 days: ${formatCount(claude.week.messages)} msgs · ${formatCount(claude.week.tokens)} tok`, null, t),
       this.renderModelRanking(claude.models, claude.week.messages, row => row.messages, row => `${formatCount(row.messages)} msgs`, t),
@@ -303,8 +326,7 @@ export default class AiUsage extends View {
   }
 
   renderAntigravity(antigravity, t) {
-    return this.renderSection("Antigravity", `${antigravity.conversations ?? 0} convs`, [
-      ...this.renderAntigravityQuota(antigravity.quota, t),
+    return this.renderSection("antigravity", "Antigravity", `${antigravity.conversations ?? 0} convs`, this.renderAntigravityQuota(antigravity.quota, t), [
       this.renderNote(`5h: ${formatCount(antigravity.window.generations)} gens · ${formatCount(antigravity.window.tokens ?? 0)} tok`, null, t),
       this.renderNote(`7 days: ${formatCount(antigravity.week.generations)} gens · ${formatCount(antigravity.week.tokens ?? 0)} tok`, null, t),
       this.renderModelRanking(antigravity.models, antigravity.week.generations, row => row.generations, row => `${formatCount((row.input ?? 0) + (row.output ?? 0))} tok`, t),
