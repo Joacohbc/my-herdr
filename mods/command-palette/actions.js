@@ -26,13 +26,19 @@ export function getActiveLocation() {
   const f = focused();
   const allPanes = panes();
   const pane = f?.pane ? allPanes.find(p => p.pane === f.pane) : null;
+  const viewerRoot = pane?.mod === "file-viewer" ? shared("file-viewer.meta")?.[pane.pane]?.root : null;
   const fallbackTermPane = pane && !pane.cwd && f?.tab
     ? allPanes.find(p => p.tab === f.tab && p.cwd)
     : null;
+  const spaceTabIds = new Set((space?.tabs ?? []).map(t => t.id));
+  const spaceTermPane = !pane?.cwd && !viewerRoot && !fallbackTermPane?.cwd
+    ? allPanes.find(p => spaceTabIds.has(p.tab) && p.cwd)
+    : null;
+  const sameSpaceFocusedCwd = f?.space === space?.id ? f?.cwd : null;
   const on = f?.pane === null
     ? (f.terminal?.includes("/") ? f.terminal.split("/")[0] : null)
     : space?.machine ?? null;
-  const cwd = pane?.cwd || fallbackTermPane?.cwd || f?.cwd || space?.folder || "";
+  const cwd = pane?.cwd || viewerRoot || fallbackTermPane?.cwd || spaceTermPane?.cwd || space?.folder || sameSpaceFocusedCwd || "";
   return { cwd, on, space: space?.id ?? null };
 }
 
@@ -155,16 +161,26 @@ export async function openInTerminalEditor({ absPath, folder, on, place = "tab",
 }
 
 export function openInFileViewer({ relPath, root, on, name }) {
+  const editorMode = Boolean(shared("editor.mode")?.enabled);
   const f = focused();
   const tabId = f?.tab ?? null;
-  const payload = { file: relPath, root, on: on ?? null, tab: tabId, line: null, col: null, matchLen: null };
-  const existing = tabId ? panes().find(p => p.tab === tabId && p.mod === "file-viewer") : null;
+  const payload = { file: relPath, root, on: on ?? null, tab: tabId, line: null, col: null, matchLen: null, editFirst: editorMode };
+  const allPanes = panes();
+  const tabPanes = tabId ? allPanes.filter(p => p.tab === tabId) : [];
+  const existing = tabPanes.find(p => p.pane === f?.pane && p.mod === "file-viewer") ?? tabPanes.find(p => p.mod === "file-viewer");
+  const meta = shared("file-viewer.meta") ?? {};
 
-  if (existing) {
+  if (existing && !meta[existing.pane]?.dirty) {
     const prevSeq = shared("file-viewer.open")?.seq ?? 0;
-    setShared("file-viewer.open", { ...payload, pane: existing.pane, seq: prevSeq + 1 });
+    setShared("file-viewer.open", { ...payload, pane: existing.pane, replace: true, seq: prevSeq + 1 });
     run("pane.focus", { pane: existing.pane });
     run("pane.rename", { pane: existing.pane, name });
+    if (tabPanes.length === 1) run("tab.rename", { id: tabId, name });
+    return;
+  }
+
+  if (existing && meta[existing.pane]?.dirty) {
+    run("tab.new", { name, mod: "file-viewer", props: { ...payload, tab: null, solo: true } });
     return;
   }
 
@@ -353,6 +369,15 @@ export function switchToTarget(item) {
 }
 
 const CUSTOM_COMMANDS = [
+  {
+    id: "custom:toggle-editor-mode",
+    group: "Editor",
+    title: "Toggle Editor Mode (VS Code layout)",
+    subtitle: "Sticky left Explorer, rail sidebar, open files in tabs, Raw-first editing",
+    words: "editor mode vscode files sticky tabs raw ctrl-shift-e",
+    shortcutKey: "tabs-custom.toggle_editor_mode",
+    action: { kind: "run", command: "tabs-custom.toggle_editor_mode" },
+  },
   {
     id: "custom:switch-space-tab",
     group: "Switch",

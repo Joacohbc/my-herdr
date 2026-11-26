@@ -16,9 +16,13 @@ function findLayoutNode(node, id) {
   return null;
 }
 
-function isFilesPanelVisible() {
+function isFilesPanelVisible(slot = "files") {
   if (window()?.visible === false) return false;
   const root = layout();
+  if (slot === "editor-files") {
+    const node = findLayoutNode(root, "editor-files");
+    return Boolean(node && !node.hidden);
+  }
   const panel = findLayoutNode(root, "panel");
   if (!panel || panel.hidden) return false;
   const body = findLayoutNode(root, "panel-body");
@@ -86,11 +90,17 @@ function location() {
   const space = spaces().find(s => s.active), f = focused();
   const allPanes = panes();
   const pane = f?.pane ? allPanes.find(p => p.pane === f.pane) : null;
+  const viewerRoot = pane?.mod === "file-viewer" ? shared("file-viewer.meta")?.[pane.pane]?.root : null;
   const fallbackTermPane = pane && !pane.cwd && f?.tab
     ? allPanes.find(p => p.tab === f.tab && p.cwd)
     : null;
+  const spaceTabIds = new Set((space?.tabs ?? []).map(t => t.id));
+  const spaceTermPane = !pane?.cwd && !viewerRoot && !fallbackTermPane?.cwd
+    ? allPanes.find(p => spaceTabIds.has(p.tab) && p.cwd)
+    : null;
+  const sameSpaceFocusedCwd = f?.space === space?.id ? f?.cwd : null;
   const on = f?.pane === null ? (f.terminal?.includes("/") ? f.terminal.split("/")[0] : null) : space?.machine ?? null;
-  return { cwd: pane?.cwd || fallbackTermPane?.cwd || f?.cwd || space?.folder, on, space: space?.id };
+  return { cwd: pane?.cwd || viewerRoot || fallbackTermPane?.cwd || spaceTermPane?.cwd || space?.folder || sameSpaceFocusedCwd, on, space: space?.id };
 }
 const key = () => JSON.stringify(location());
 const PER_FOLDER = 250, TOTAL = 1500;
@@ -132,6 +142,7 @@ async function directory(path, on) {
 export default class FilesSearch extends View {
   init(initialProps, cx) {
     const p = (initialProps && Object.keys(initialProps).length ? initialProps : null) ?? props();
+    this.slot = p?.slot ?? "files";
     this.menuData = p?.menu ?? null;
     this.overlayId = p?.overlay ?? null;
     if (this.menuData) {
@@ -213,7 +224,7 @@ export default class FilesSearch extends View {
     this.lastRefreshSeq = shared("files-search.refresh")?.seq ?? 0;
 
     if (checking()) return;
-    if (isFilesPanelVisible()) this.refresh(cx);
+    if (isFilesPanelVisible(this.slot)) this.refresh(cx);
     cx.timer.every(1000, cx => this.refreshIfDue(cx));
   }
 
@@ -329,7 +340,7 @@ export default class FilesSearch extends View {
     const forceGc = gcSeq !== this.lastGcSeq;
     this.lastGcSeq = gcSeq;
 
-    const visible = isFilesPanelVisible();
+    const visible = isFilesPanelVisible(this.slot);
     if (!visible) {
       this.context?.watch?.pending?.cancel();
       if (this.context) this.context.watch = null;
@@ -416,7 +427,7 @@ export default class FilesSearch extends View {
   }
 
   refresh(cx) {
-    if (!isFilesPanelVisible()) return;
+    if (!isFilesPanelVisible(this.slot)) return;
     const { cwd, on } = location(), next = key();
     const visiting = next !== this.context?.key;
     if (visiting) {
@@ -783,12 +794,26 @@ export default class FilesSearch extends View {
       .child(menuItem("ctx-delete", "Delete…", (_e, cx) => this.beginDelete(cx)).text_color(t.ansi1));
   }
 
+  getActiveViewerFile() {
+    if (!this.root) return null;
+    const f = focused();
+    const allPanes = panes();
+    const meta = shared("file-viewer.meta") ?? {};
+    const focusedPane = f?.pane ? allPanes.find(p => p.pane === f.pane && p.mod === "file-viewer") : null;
+    const candidate = focusedPane ?? (f?.tab ? allPanes.find(p => p.tab === f.tab && p.mod === "file-viewer") : null);
+    if (!candidate) return null;
+    const m = meta[candidate.pane];
+    if (!m?.file || m.root !== this.root || (m.on ?? null) !== (this.on ?? null)) return null;
+    return { file: m.file, dirty: Boolean(m.dirty) };
+  }
+
   show(path, cx, locationTarget = null, event = null) {
     if (!path || !this.root) return;
     const f = focused();
     const tabId = f?.tab ?? null;
-    const openInNewTab = Boolean(event?.modifiers?.control || event?.modifiers?.platform);
+    const editorMode = Boolean(shared("editor.mode")?.enabled);
     const forceNewPane = Boolean(event?.modifiers?.shift);
+    const openInNewTab = Boolean(event?.modifiers?.control || event?.modifiers?.platform);
 
     const fileName = path.split(/[\\/]/).pop() || path;
     const payload = {
@@ -799,29 +824,66 @@ export default class FilesSearch extends View {
       line: locationTarget?.line ?? null,
       col: locationTarget?.col ?? null,
       matchLen: locationTarget?.matchLen ?? null,
+      editFirst: editorMode,
     };
 
-    if (openInNewTab) {
-      const res = run("tab.new", {
+    const allPanes = panes();
+    const meta = shared("file-viewer.meta") ?? {};
+
+    const openTabDeduplicated = () => {
+      const activeSpace = spaces().find(s => s.active);
+      const spaceTabIds = new Set((activeSpace?.tabs ?? []).map(t => t.id));
+      const existingTabPane = allPanes.find(p => {
+        if (p.mod !== "file-viewer" || !spaceTabIds.has(p.tab)) return false;
+        const m = meta[p.pane];
+        return m?.file === path && m.root === this.root && (m.on ?? null) === (this.on ?? null);
+      });
+      if (existingTabPane) {
+        run("tab.select", { id: existingTabPane.tab });
+        run("pane.focus", { pane: existingTabPane.pane });
+        if (locationTarget?.line) {
+          const prevSeq = shared("file-viewer.open")?.seq ?? 0;
+          setShared("file-viewer.open", {
+            ...payload,
+            tab: existingTabPane.tab,
+            pane: existingTabPane.pane,
+            jumpOnly: true,
+            seq: prevSeq + 1,
+          });
+        }
+        return;
+      }
+      run("tab.new", {
         name: fileName,
         mod: "file-viewer",
         props: { ...payload, tab: null, solo: true },
       });
-      if (res?.pane) {
-        run("pane.rename", { pane: res.pane, name: fileName });
-      }
+    };
+
+    if (openInNewTab) {
+      openTabDeduplicated();
       return;
     }
 
-    const existing = !forceNewPane && tabId
-      ? panes().find(p => p.tab === tabId && p.mod === "file-viewer")
+    const tabPanes = tabId ? allPanes.filter(p => p.tab === tabId) : [];
+    const existing = !forceNewPane
+      ? (tabPanes.find(p => p.pane === f?.pane && p.mod === "file-viewer") ?? tabPanes.find(p => p.mod === "file-viewer"))
       : null;
 
     if (existing) {
+      const existingMeta = meta[existing.pane];
+      const isSameFile = existingMeta?.file === path && existingMeta.root === this.root && (existingMeta.on ?? null) === (this.on ?? null);
+      if (existingMeta?.dirty && !isSameFile) {
+        openTabDeduplicated();
+        return;
+      }
       const prevSeq = shared("file-viewer.open")?.seq ?? 0;
-      setShared("file-viewer.open", { ...payload, pane: existing.pane, seq: prevSeq + 1 });
+      setShared("file-viewer.open", { ...payload, pane: existing.pane, replace: true, seq: prevSeq + 1 });
       run("pane.focus", { pane: existing.pane });
       run("pane.rename", { pane: existing.pane, name: fileName });
+      if (tabPanes.length === 1) {
+        run("tab.rename", { id: tabId, name: fileName });
+      }
       return;
     }
 
@@ -1177,11 +1239,13 @@ export default class FilesSearch extends View {
     return v_flex().id("files-name-results").flex_1().min_h(0).overflow_y_scrollbar().p(6).children(out);
   }
 
-  rows(prefix, depth, out, t) {
+  rows(prefix, depth, out, t, activeViewer) {
     if (out.length >= TOTAL || depth > 40) return out;
     for (const entry of this.entries.get(prefix) ?? []) {
       if (out.length >= TOTAL) break;
       const path = prefix ? `${prefix}/${entry.name}` : entry.name, open = this.folders.has(path), mark = this.marks[`${this.root}/${path}`];
+      const isActiveFile = !entry.dir && activeViewer?.file === path;
+      const isDirtyActive = isActiveFile && activeViewer.dirty;
       out.push(
         h_flex()
           .id(`file-${path}`)
@@ -1193,7 +1257,8 @@ export default class FilesSearch extends View {
           .items_center()
           .rounded(7)
           .cursor_pointer()
-          .hover(s => s.bg(t.hover))
+          .when(isActiveFile, el => el.bg(t.selected))
+          .hover(s => s.bg(isActiveFile ? t.selected : t.hover))
           .on_mouse_down("right", (_e, cx) => {
             cx.stop_propagation();
             this.openContextMenu(path, entry.dir);
@@ -1201,10 +1266,17 @@ export default class FilesSearch extends View {
           .on_click((e, cx) => entry.dir ? this.toggle(path, cx) : this.show(path, cx, null, e))
           .child(entry.dir ? svg(`mods/files-search/chevron-${open ? "down" : "right"}.svg`).size(12).flex_none().text_color(t.dim) : div().w(12).flex_none())
           .child(image(entry.dir ? folderIcon(entry.name, open) : fileIcon(entry.name)).w(16).h(16).flex_none())
-          .child(div().flex_1().min_w(0).truncate().child(entry.name))
+          .child(
+            div()
+              .flex_1()
+              .min_w(0)
+              .truncate()
+              .when(isActiveFile, el => el.font_medium().text_color(t.foreground))
+              .child(isDirtyActive ? `* ${entry.name}` : entry.name),
+          )
           .when(Boolean(mark), el => el.child(div().text_size(11).text_color(mark === "A" ? t.ansi2 : mark === "D" || mark === "U" ? t.ansi1 : t.blocked).child(mark))),
       );
-      if (entry.dir && open) this.rows(path, depth + 1, out, t);
+      if (entry.dir && open) this.rows(path, depth + 1, out, t, activeViewer);
     }
     return out;
   }
@@ -1219,9 +1291,11 @@ export default class FilesSearch extends View {
     }
     const isSearching = this.query.trim().length > 0;
     const headerRight = this.root?.split(/[\\/]/).pop() ?? "";
+    const activeViewer = this.getActiveViewerFile();
+    const panelTitle = this.slot === "editor-files" ? "Explorer" : "Files";
 
     return v_flex()
-      .id("files")
+      .id(this.slot === "editor-files" ? "editor-files-view" : "files")
       .size_full()
       .min_h(0)
       .rounded(10)
@@ -1241,7 +1315,7 @@ export default class FilesSearch extends View {
           .items_center()
           .border_b(1)
           .border_color(t.border)
-          .child(div().font_semibold().child("Files"))
+          .child(div().font_semibold().child(panelTitle))
           .child(div().flex_1().min_w(0).truncate().text_right().text_size(11.5).text_color(t.dim).child(headerRight))
           .child(
             div()
@@ -1293,7 +1367,7 @@ export default class FilesSearch extends View {
             .min_h(0)
             .overflow_y_scrollbar()
             .p(6)
-            .children(this.rows("", 0, [], t))
+            .children(this.rows("", 0, [], t, activeViewer))
             .when(Boolean(this.error) || !this.entries.get("")?.length, empty =>
               empty.child(div().p(8).text_size(12).text_color(t.dim).child(this.error || (this.loading ? "Loading files…" : this.root ? "No files" : "No folder"))),
             )

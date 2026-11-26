@@ -436,13 +436,38 @@ export default class FileViewer extends View {
       if (this.code) {
         const currentVal = this.code.value();
         this.rawText = currentVal;
-        if (this.kind === "csv" && this.codeDirty) {
+        if (this.kind === "csv" && (this.codeDirty || !this.csvTable)) {
           this.csvTable = parseCsvTable(currentVal, this.file.toLowerCase().endsWith(".tsv"));
           this.csvUniqueCache.clear();
           this.rebuildCsvViewRows();
         }
         this.code.release();
         this.code = null;
+      }
+      if (this.kind === "svg" && !this.imageRelPath && this.file && this.root) {
+        const seq = ++this.loadSeq;
+        const fullPath = `${this.root}/${this.file}`;
+        const on = this.on;
+        this.loading = true;
+        cx.spawn(async cx => {
+          try {
+            const staged = await stageImagePreview(fullPath, on, `${this.token}-${seq}`);
+            if (this.loadSeq !== seq || !this.previewMode) {
+              removePreviewFile(staged.relPath);
+              return;
+            }
+            this.imageRelPath = staged.relPath;
+            this.imageSizeBytes = staged.sizeBytes;
+            this.imageAspect = staged.aspect || 1;
+          } catch (e) {
+            if (this.loadSeq === seq) this.error = String(e?.message || e);
+          } finally {
+            if (this.loadSeq === seq) {
+              this.loading = false;
+              cx.notify();
+            }
+          }
+        });
       }
       return;
     }
@@ -500,11 +525,12 @@ export default class FileViewer extends View {
   }
 
   checkSharedTarget(cx, fromRender = false) {
-    if (this.solo) return;
     const req = shared("file-viewer.open");
     if (!req || !req.seq || req.seq === this.lastSharedSeq) return;
-    if (this.tabId && req.tab && req.tab !== this.tabId) return;
     const paneId = this.resolvePaneId();
+    const targetedHere = Boolean(req.pane && paneId && req.pane === paneId);
+    if (this.solo && !((req.jumpOnly || req.replace) && targetedHere)) return;
+    if (this.tabId && req.tab && req.tab !== this.tabId) return;
     if (req.pane && paneId && req.pane !== paneId) return;
     this.lastSharedSeq = req.seq;
     this.openTarget(req, cx, fromRender);
@@ -576,7 +602,8 @@ export default class FileViewer extends View {
 
     this.releaseBuffers();
     this.highlightRange = null;
-    this.previewMode = this.kind !== "code";
+    const editFirst = Boolean(target.editFirst ?? shared("editor.mode")?.enabled);
+    this.previewMode = this.kind === "code" ? false : (this.supportsRawToggle() ? !editFirst : true);
     this.loading = true;
     this.publishMeta();
 
@@ -586,7 +613,7 @@ export default class FileViewer extends View {
 
     cx.spawn(async cx => {
       try {
-        if (kind === "image" || kind === "svg") {
+        if (kind === "image" || (kind === "svg" && this.previewMode)) {
           const staged = await stageImagePreview(fullPath, on, `${this.token}-${seq}`);
           if (this.loadSeq !== seq) {
             removePreviewFile(staged.relPath);
@@ -636,7 +663,7 @@ export default class FileViewer extends View {
           : null;
         this.highlightRange = range && range.end > range.start ? range : null;
 
-        if (kind === "csv") {
+        if (kind === "csv" && this.previewMode) {
           this.rawText = content;
           this.csvOriginalText = text;
           this.csvTable = parseCsvTable(content, this.file.toLowerCase().endsWith(".tsv"));
@@ -660,9 +687,11 @@ export default class FileViewer extends View {
           this.rawText = content;
           this.code = null;
         } else {
+          if (kind === "csv") this.csvOriginalText = text;
           const ed = this.attachEditor(this.file, content);
           if (range) ed.set_selected_range(range);
-          this.rawText = kind === "markdown" ? content : null;
+          this.rawText = this.supportsRawToggle() ? content : null;
+          if (editFirst && this.isPaneVisible()) ed.focus();
         }
       } catch (e) {
         if (this.loadSeq === seq) {

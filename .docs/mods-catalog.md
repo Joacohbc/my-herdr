@@ -16,9 +16,10 @@ Explorador de archivos perezoso con buscador estilo VS Code e iconos oficiales d
   - Toggles: `Aa` (Match Case), `ab` (Whole Word), `.*` (Regex) y `⋯` (Include, Exclude extra y exclusiones por defecto activadas).
   - La consulta se pasa siempre como argumento posicional (`"$1"`) con `--`.
 - **Interacciones:**
-  - Clic normal: abre en `file-viewer` dentro de la pestaña actual (reutiliza visor existente o hace split a la derecha).
-  - `Ctrl + clic`: abre en nueva pestaña dedicada (`solo: true`).
+  - Clic normal: abre en `file-viewer` dentro de la pestaña actual (reutiliza el visor activo no sucio —renombrando la pestaña si es solo visor— o hace split a la derecha; si el visor actual tiene cambios sin guardar, abre una pestaña nueva). En **Modo Editor** resalta además el archivo activo en el árbol y prioriza edición `Raw`.
+  - `Ctrl + clic`: abre en nueva pestaña dedicada deduplicada (`solo: true`, saltando a la pestaña existente en el Space activo si ya está abierto).
   - `Shift + clic`: abre un split adicional de `file-viewer`.
+  - **Slots (`files` / `editor-files`):** soporta `props().slot === "editor-files"` para mostrarse como `Explorer` fijo a la izquierda de `main` durante el Modo Editor manteniendo el control de visibilidad y evicción independiente.
   - **Creación y edición rápida:** botones `+File` y `+Dir` en la barra superior (crean en la raíz del espacio activo vía `command-palette`) y reacción automática a `shared("files-search.refresh")` para refrescar y expandir carpetas padre.
   - **Clic derecho:** abre menú contextual popup (`New File…`, `New Folder…`, `Copy Relative Path`, `Copy Absolute Path`, `Copy Name`, `Open in New Tab`, `Edit in Terminal (micro/nano)` con autodetección local/SSH, y `Delete…` con confirmación en popup, conteo de elementos en carpetas y envío a papelera vía `gio trash`/`trash-put` o `rm` pasando la ruta como `"$1"`).
   - **Refresco en tiempo real:** los eventos de `watchFolder` actualizan el árbol y el estado Git incluso con la ventana sin foco (y podan automáticamente carpetas expandidas eliminadas).
@@ -34,7 +35,7 @@ Visor y editor multi-formato con hibernación automática y zoom interactivo (`C
   - **CSV / TSV (`.csv`, `.tsv`):** parser RFC-4180 con autodetección de delimitador (`,`, `;`, `\t`), tabla estilo Excel paginada (`200` filas/página, máx. `5000 × 60`), columnas resizables (`56–640 px`), ordenamiento numérico/alfabético por columna, filtro Excel multiselección por columna (`▾`), buscador global con autocompletado `@Col:val1,val2` (comillas, `Tab`/`Shift+Tab` + `Enter`, caché LRU de 200 valores únicos) y edición de celdas con barra de fórmula + toggle `Preview` / `Raw`.
   - **PDF (`.pdf`):** `pdfinfo` + `pdftoppm` página a página (`← Prev` / `Next →`), borrando el PNG anterior inmediatamente.
   - **Código / Texto:** `EditorState` editable (solo lectura si supera `250 KB`), syntax highlighting con tokens de `theme()`, `Wrap` y salto a línea/columna.
-- **Edición segura:** estado `*` en título (`meta.dirty`), barra `* Unsaved changes` con `✓ Save (Ctrl+S)` y `↺ Discard`, y bloqueo de hibernación mientras existan cambios sin guardar.
+- **Edición segura:** estado `*` en título (`meta.dirty`), barra `* Unsaved changes` con `✓ Save (Ctrl+S)` y `↺ Discard`, y bloqueo de hibernación mientras existan cambios sin guardar. En **Modo Editor**, los archivos `.md`, `.csv`/`.tsv` y `.svg` se abren directamente en modo `Raw` editable con foco automático (cargando `Preview` bajo demanda) y las pestañas `solo` aceptan saltos de línea (`jumpOnly`).
 
 ### 1.3 `changes-history` (`mods/changes-history/`)
 Panel de Source Control estilo VS Code compatible con repositorios locales y SSH.
@@ -45,7 +46,7 @@ Panel de Source Control estilo VS Code compatible con repositorios locales y SSH
   - Panel superior scrolleable (`Staged Changes` y `Changes`) separado por un **divisor horizontal resizable** (`localStorage["sc.bottomH"]`) del panel inferior (`Stashes`, `Graph` y `Pull Requests`).
   - **`Graph`:** muestra la fecha (`YYYY-MM-DD`) junto al hash corto en cada commit, incluye buscador por mensaje (`git log --fixed-strings --regexp-ignore-case --grep=...` con debounce de `220 ms`), selector desplegable de rama (`Current`, `All branches`, locales y remotas hasta `150` ramas) y paginación por fecha (`--before=<epoch>`, límite explícito de `1000` commits por página con navegación `← Newer` / `Latest` / `Older commits →`).
   - **`Pull Requests` (`github.js`):** integración bajo demanda con GitHub mediante `gh` CLI en el repositorio actual (local y SSH) con buscador (`280 ms` debounce), filtro por estado (`Open`, `Merged`, `Closed`, `All`), apertura directa en navegador (`↗` vía `cx.open_url`), vista de detalle con archivos/diff virtualizado y `Checkout` (`gh pr checkout`).
-  - `Ctrl + clic` en archivos de `Changes` / `Staged Changes`, commits de `Graph` o PRs de `Pull Requests` abre la vista de diff virtualizado dedicada en una nueva pestaña (con hibernación automática en segundo plano tras `45 s`).
+  - En `Changes` / `Staged Changes`, clic normal abre el diff virtualizado en la pestaña actual (reutilizando un panel de diff existente o haciendo split a la derecha, sin usar el diff compacto inferior); `Ctrl + clic` en archivos, commits de `Graph` o PRs abre la vista de diff dedicada en una nueva pestaña (con hibernación automática en segundo plano tras `45 s`).
   - Confirmación obligatoria en rojo (cancelable con `Esc`) antes de `Discard`, `Delete untracked file` o `Drop stash`.
   - Publica `shared("changes.badge")` continuamente (con verificación liviana cada `15 s` cuando el panel está oculto).
 
@@ -58,8 +59,8 @@ Encabezado unificado para todos los paneles del layout `my-herdr`.
 ### 1.5 `tabs-custom` (`mods/tabs-custom/`)
 Clon personalizado de la barra de pestañas `tabs`.
 
-- **Archivos:** `main.js`, `mod.json`, `web.svg`, `win-close.svg`, `win-max.svg`, `win-min.svg`, `win-restore.svg`.
-- **Responsabilidades:** conserva el comportamiento nativo de pestañas, añade el botón `Web` (abre el popup `web-launcher`), muestra un **badge circular flotante** en la esquina superior derecha del botón `Changes` leyendo `shared("changes.badge")` y publica de forma diferida el historial MRU acotado (`shared("switcher.mru")`, máx. `24`) al cambiar de espacio o pestaña activa.
+- **Archivos:** `main.js`, `mod.json` (entrada `palette` para `Toggle Editor Mode`), `editor.svg`, `web.svg`, `win-close.svg`, `win-max.svg`, `win-min.svg`, `win-restore.svg`.
+- **Responsabilidades:** conserva el comportamiento nativo de pestañas, añade el botón toggle `Editor` (`Ctrl + Shift + E` / `tabs-custom.toggle_editor_mode`, colapsa `sidebar` a rail `44 px` y muestra `editor-files` fijo a la izquierda), añade el botón `Web` (abre el popup `web-launcher`), muestra icono de archivo y prefijo `* ` en pestañas `file-viewer` sucias, muestra un **badge circular flotante** en la esquina superior derecha del botón `Changes` leyendo `shared("changes.badge")` y publica de forma diferida el historial MRU acotado (`shared("switcher.mru")`, máx. `24`) al cambiar de espacio o pestaña activa.
 
 ### 1.6 `system-monitor` (`mods/system-monitor/`)
 Monitor en vivo de CPU, RAM y árbol de procesos en la barra lateral izquierda + motor de limpieza automática.
@@ -141,6 +142,6 @@ Bloque `usage` del sidebar izquierdo (último del stack) con la cuota y el model
 | `install.sh` | Crea los symlinks de `layouts/my-herdr.json`, `command-aliases.json`, `ai-usage.json` y los 12 mods hacia `~/.config/herdr-app/`, ejecuta `scripts/apply-keys.js` y valida todos los mods con `herdr-app check`. |
 | `ai-usage.json` | Configuración de `ai-usage` (`node`: binario o home de Node; `claude`/`agy`: binarios de los CLIs; `claudeQuota`/`antigravityQuota`) enlazada a `~/.config/herdr-app/ai-usage.json`. |
 | `command-aliases.json` | Lista configurable de aliases (`{ name, command, description, place, keepOpen }`) consumida por `command-palette` en modo `>`. |
-| `scripts/apply-keys.js` | Sincroniza atajos de flechas (`Alt + ←/↓/↑/→`, `Alt + Shift + ←/↓/↑/→`), pestañas (`Ctrl+T`, `Ctrl+W`, `Ctrl+Shift+T`) y paleta (`Ctrl+Shift+P` → `mod.open:command-palette`) en `"global"`, `"layout:my-herdr"` y `"terminal"` dentro de `~/.config/herdr-app/keys.json`. |
+| `scripts/apply-keys.js` | Sincroniza atajos de flechas (`Alt + ←/↓/↑/→`, `Alt + Shift + ←/↓/↑/→`), pestañas (`Ctrl+T`, `Ctrl+W`, `Ctrl+Shift+T`), Modo Editor (`Ctrl+Shift+E` → `tabs-custom.toggle_editor_mode`) y paleta (`Ctrl+Shift+P` → `mod.open:command-palette`) en `"global"`, `"layout:my-herdr"` y `"terminal"` dentro de `~/.config/herdr-app/keys.json`. |
 | `scripts/build-icons.js` | Compacta el mapa de Material Icon Theme desde `mods/files-search/material-icons.js` a tablas invertidas perezosas con `releaseIconCache()` para `files-search` (archivos + carpetas) y `changes-history` (solo archivos). |
 | `layouts/my-herdr.json` | Definición del árbol de layout activo en Herdr App. |

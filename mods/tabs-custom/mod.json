@@ -4,5 +4,13 @@
   "cloned_from": {
     "name": "tabs",
     "version": "0.1.18"
-  }
+  },
+  "palette": [
+    {
+      "title": "Toggle Editor Mode",
+      "command": "tabs-custom.toggle_editor_mode",
+      "group": "Editor",
+      "words": "editor mode vscode files sticky tabs ctrl-shift-e"
+    }
+  ]
 }

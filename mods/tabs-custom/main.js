@@ -1,8 +1,10 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, ScrollHandle } from "gpui-base";
-import { spaces, panes, run, openOverlay, theme, window, shared, setShared, layout, settings, checking } from "herdr";
+import { spaces, panes, run, openOverlay, theme, window, shared, setShared, layout, settings, checking, nextCommand } from "herdr";
 
 const MAX_SWITCHER_MRU = 24;
+const SIDEBAR_RAIL_PX = 44;
+const DEFAULT_SIDEBAR_PX = 268;
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -30,13 +32,57 @@ function label(tab, lead) {
 }
 
 export default class Tabs extends View {
-  init() {
+  init(_props, cx) {
     this.pressed = null;
     this.scroll = ScrollHandle.new();
     this.lastMruKey = null;
     try { this.panels = JSON.parse(localStorage.getItem("panels") ?? "{}"); } catch { this.panels = {}; }
     if (!this.panels || typeof this.panels !== "object" || Array.isArray(this.panels)) this.panels = {};
     this.swipe = { acc: 0, steps: 0, at: 0, last: 0 };
+    if (checking()) return;
+    cx.spawn(async cx => {
+      await cx.sleep(0);
+      const state = shared("editor.mode");
+      if (state?.enabled) this.applyEditorLayout(true, state.prevSidebarPx);
+    });
+    cx.spawn(async () => {
+      for (;;) {
+        const cmd = await nextCommand();
+        if (cmd === "toggle_editor_mode") this.toggleEditorMode();
+      }
+    });
+  }
+
+  applyEditorLayout(enabled, prevSidebarPx = DEFAULT_SIDEBAR_PX) {
+    const root = layout();
+    if (enabled) {
+      run("layout.resize", { id: "sidebar", px: SIDEBAR_RAIL_PX });
+      run("layout.show", { id: "editor-files" });
+      const panel = find(root, "panel");
+      const body = find(root, "panel-body");
+      if (panel && !panel.hidden && (!body || body.active === "files")) {
+        run("layout.hide", { id: "panel" });
+      }
+      return;
+    }
+    run("layout.hide", { id: "editor-files" });
+    const restorePx = prevSidebarPx > SIDEBAR_RAIL_PX ? prevSidebarPx : DEFAULT_SIDEBAR_PX;
+    run("layout.resize", { id: "sidebar", px: restorePx });
+  }
+
+  toggleEditorMode() {
+    const prev = shared("editor.mode") ?? {};
+    const nextEnabled = !prev.enabled;
+    const sidebarPx = find(layout(), "sidebar")?.size?.px ?? DEFAULT_SIDEBAR_PX;
+    const prevSidebarPx = nextEnabled
+      ? (sidebarPx > SIDEBAR_RAIL_PX ? sidebarPx : (prev.prevSidebarPx ?? DEFAULT_SIDEBAR_PX))
+      : (prev.prevSidebarPx ?? DEFAULT_SIDEBAR_PX);
+    setShared("editor.mode", {
+      enabled: nextEnabled,
+      prevSidebarPx,
+      seq: (prev.seq ?? 0) + 1,
+    });
+    this.applyEditorLayout(nextEnabled, prevSidebarPx);
   }
 
   recordMru(space, activeTab, allSpaces, cx) {
@@ -86,14 +132,16 @@ export default class Tabs extends View {
 
   // The side panel is remembered per space: switching shows that space's choice
   // (closed if it never had one), and opening or closing it records it.
-  syncPanel(space, panel, body, enabled) {
+  syncPanel(space, panel, body, enabled, editorMode = false) {
     if (!space || !panel) return;
     const now = panel.hidden ? null : body?.active ?? null;
     if (space.id !== this.space) {
       const first = this.space === undefined;
       this.space = space.id; this.pending = null;
       if (!(first && !(space.id in this.panels))) {
-        const stored = this.panels[space.id] ?? null, want = enabled.includes(stored) ? stored : null;
+        const stored = this.panels[space.id] ?? null;
+        const allowed = editorMode && stored === "files" ? null : stored;
+        const want = enabled.includes(allowed) ? allowed : null;
         if (want !== now) {
           this.pending = { want, until: Date.now() + 1000 };
           if (want) { run("layout.select", { stack: "panel-body", child: want }); run("layout.show", { id: "panel" }); }
@@ -107,6 +155,7 @@ export default class Tabs extends View {
       if (this.pending.want !== now && Date.now() < this.pending.until) return;
       this.pending = null;
     }
+    if (editorMode && now === null && this.panels[space.id] === "files") return;
     if (this.panels[space.id] === now) return;
     this.panels[space.id] = now;
     localStorage.setItem("panels", JSON.stringify(this.panels));
@@ -115,6 +164,9 @@ export default class Tabs extends View {
   render(cx) {
     const t = theme();
     const allSpaces = spaces();
+    const allPanes = panes();
+    const viewerMeta = shared("file-viewer.meta") ?? {};
+    const editorMode = Boolean(shared("editor.mode")?.enabled);
     const space = allSpaces.find(p => p.active);
     const shown = space?.tabs ?? [];
     const active = shown.findIndex(tab => tab.active);
@@ -129,9 +181,13 @@ export default class Tabs extends View {
     const button = (id, label, action) => div().id(id).size(26).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
       .on_mouse_down("left", stop).on_click(action).child(label);
     const item = (c, i) => {
-      const lead = panes().find(p => p.tab === c.id && p.program?.agent) ?? panes().find(p => p.tab === c.id);
+      const tabPanes = allPanes.filter(p => p.tab === c.id);
+      const lead = tabPanes.find(p => p.program?.agent) ?? tabPanes[0];
       const program = lead?.program;
-      const name = label(c, lead);
+      const isFileTab = !program?.icon && tabPanes.some(p => p.mod === "file-viewer");
+      const isDirtyFile = tabPanes.some(p => p.mod === "file-viewer" && viewerMeta[p.pane]?.dirty);
+      const baseName = label(c, lead);
+      const name = isDirtyFile ? `* ${baseName}` : baseName;
       return h_flex().id(`tab-${c.id}`).h(29).px(10).gap(7).rounded(7).items_center().flex_none().text_size(12.8)
         // A rename or status dot on this or an earlier tab can push the active one out.
         .when(i <= active, el => el.on_size_change((_size, cx) => { this.scroll.scroll_to_item(active); cx.notify(); }))
@@ -145,6 +201,7 @@ export default class Tabs extends View {
         })
         .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); openOverlay({ mod: "menu", kind: "popup", width: 200, props: { tab: "tab", target: { id: c.id, space: space.id } } }); })
         .when(Boolean(program?.icon), el => el.child(program.tint ? svg(program.icon).size(14).text_color(t.muted) : image(program.icon).size(14)))
+        .when(isFileTab, el => el.child(svg("mods/files/file.svg").size(13).text_color(isDirtyFile ? t.blocked : t.muted)))
         .child(div().max_w(170).truncate().child(c.zoomed ? `${name} Z` : name))
         .when(c.status === "working", el => el.child(svg("mods/workspace-chrome/spinner.svg").size(12).flex_none().text_color(t.working).spin(900)))
         .when(c.status === "blocked" || c.status === "done", el => el.child(div().size(6).rounded(3).bg(t[c.status])))
@@ -157,7 +214,7 @@ export default class Tabs extends View {
       : 10;
     const panel = find(root, "panel"), body = find(root, "panel-body");
     const enabled = shared("workspace.panels") ?? ["files", "changes"];
-    this.syncPanel(space, panel, body, enabled);
+    this.syncPanel(space, panel, body, enabled, editorMode);
     const changesBadge = shared("changes.badge");
     const changesCount = changesBadge && (!changesBadge.space || changesBadge.space === space?.id)
       ? Number(changesBadge.count || 0)
@@ -198,6 +255,14 @@ export default class Tabs extends View {
           ),
         );
     };
+    const editorButton = h_flex().id("panel-editor").h(26).px(8).gap(5).flex_none().items_center().rounded(6)
+      .text_size(12).bg(editorMode ? t.selected : t.chrome).text_color(editorMode ? t.accent : t.muted)
+      .hover(s => s.bg(editorMode ? t.selected : t.hover).text_color(editorMode ? t.accent : t.foreground))
+      .tooltip("Toggle Editor Mode (Ctrl+Shift+E)")
+      .on_mouse_down("left", stop)
+      .on_click(() => this.toggleEditorMode())
+      .child(svg("mods/tabs-custom/editor.svg").size(14))
+      .child("Editor");
     const webButton = h_flex().id("panel-web").h(26).px(8).gap(5).flex_none().items_center().rounded(6)
       .text_size(12).bg(t.chrome).text_color(t.muted)
       .hover(s => s.bg(t.hover).text_color(t.foreground))
@@ -215,8 +280,9 @@ export default class Tabs extends View {
         .on_size_change((_size, cx) => { if (active >= 0) { this.scroll.scroll_to_item(active); cx.notify(); } })
         .children(shown.map(item)))
       .child(button("tab-new", "+", () => openOverlay({ mod: "new-menu", kind: "popup", width: 250, height: 512 })))
+      .child(editorButton)
       .child(webButton)
-      .when(enabled.includes("files"), el => el.child(panelButton("files", "Files", "mods/files/file.svg")))
+      .when(!editorMode && enabled.includes("files"), el => el.child(panelButton("files", "Files", "mods/files/file.svg")))
       .when(enabled.includes("changes"), el => el.child(panelButton("changes", "Changes", "mods/changes/changes.svg", changesCount)))
       .when(w?.buttons, el => el.child(button("minimize", w.platform === "windows" ? svg("mods/tabs-custom/win-min.svg").size(16) : "−", () => run("window.minimize")))
         .child(button("maximize", w.platform === "windows" ? svg(`mods/tabs-custom/${w.maximized ? "win-restore" : "win-max"}.svg`).size(16) : "□", () => run("window.maximize")))

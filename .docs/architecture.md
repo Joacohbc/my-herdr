@@ -19,6 +19,7 @@ root (row)
 └── work (column)
     ├── tabs             → mod: tabs-custom             [CUSTOM]
     ├── work-body (row)
+    │   ├── editor-files → mod: files-search (slot: editor-files, hidden por defecto) [CUSTOM]
     │   ├── main         → tab: active, pane header → pane-custom [CUSTOM]
     │   │                  (contiene terminales, file-viewer o changes-history standalone)
     │   └── panel (stack, hidden por defecto)
@@ -41,11 +42,13 @@ Los mods de Herdr corren en contextos aislados dentro de `gpui-shell` y se comun
 | `web-launcher.profile` | `web-launcher` | `web-launcher` | ID del último perfil de Chrome seleccionado (`"clean"`, `"Default"`, `"Profile 2"`, etc.). |
 | `ports.http` | `ports-monitor` | `web-launcher` | Lista acotada (máx. `32`) de puertos HTTP/HTTPS activos `[{ url, port, proto, exposure, service, process }]` publicada solo cuando cambia. |
 | `changes.badge` | `changes-history` | `tabs-custom` | `{ count, space }`. Contador de archivos con cambios sin commitear para el badge flotante del botón `Changes`. |
+| `changes.diff.open` | `changes-history` (panel) | `changes-history` (standalone) | `{ pane, tab, fileDiff, root, on, seq }`. Reutiliza un panel de diff abierto en la pestaña actual al hacer clic en otro archivo desde `Changes` / `Staged Changes`. |
 | `herdr.gc` | `system-monitor` | `files-search`, `file-viewer`, `changes-history`, `ports-monitor` | `{ seq, at, reason }`. Señal de limpieza global que dispara evicción inmediata de cachés e hibernación de pestañas inactivas. |
 | `tiling.closedPanes` / `tiling.closedTabs` | `pane-custom` | `pane-custom` | Pilas acotadas a 8 elementos deduplicados para `pane-custom.reopen_pane` y `pane-custom.reopen_tab` (`Ctrl + Shift + T`). |
 | `files-search.refresh` | `command-palette` | `files-search` | `{ seq, expand, root, on }`. Notifica al árbol de `Files` tras crear un archivo/carpeta para refrescar y expandir automáticamente la ruta padre. |
 | `command-palette.recent` | `command-palette` | `command-palette` | Historial acotado (máx. `10`) de comandos ejecutados recientemente mediante el prefijo `>`. |
 | `switcher.mru` | `tabs-custom` | `command-palette` | Historial MRU acotado (máx. `24`) de pares `{ space, tab, at }` visitados para el conmutador estilo *Alt-Tab* en `Ctrl + Shift + P`. |
+| `editor.mode` | `tabs-custom` | `tabs-custom`, `files-search`, `file-viewer`, `command-palette` | `{ enabled, prevSidebarPx, seq }`. Estado global persistido del Modo Editor estilo VS Code (`Ctrl + Shift + E` o botón `Editor`). |
 
 ---
 
@@ -65,7 +68,7 @@ Cada mod gestiona su memoria en tres capas complementarias:
 
 ---
 
-## 4. Decisiones de Arquitectura (`D1`–`D21`)
+## 4. Decisiones de Arquitectura (`D1`–`D22`)
 
 | ID | Decisión | Alternativa descartada y motivo |
 | --- | --- | --- |
@@ -90,3 +93,4 @@ Cada mod gestiona su memoria en tres capas complementarias:
 | **D19** | Agregar el uso de IA en `mods/ai-usage/collect.mjs` (Node resuelto desde `ai-usage.json` → `command -v` → `$SHELL -ic 'which …'`) con caché incremental en `data/ai-usage/`, y obtener las cuotas con los comandos locales `claude -p /usage --no-session-persistence` y `agy -p /usage --output-format json`. | Leer ~200 MB de JSONL o abrir SQLite dentro del sandbox GPUI disparaba la RAM del mod y el runtime no tiene `node:sqlite`. El endpoint OAuth no documentado (`api/oauth/usage`) exigía leer el token de `~/.claude/.credentials.json`; los CLIs oficiales responden sin turno de modelo (0 tokens). `claude /usage` solo entrega texto, por lo que su parser puede romperse si cambia el formato: ante error se muestran las estimaciones locales. |
 | **D20** | Ajustar el stack del sidebar al alto de la ventana con `fitStackToViewport()` (en `stack-resize.js`): lee `globalThis.window.viewport_size()` de GPUI; al expandir, el bloque se limita al espacio libre sin tocar a los demás, y solo si no entra su mínimo (o la ventana se achicó, revisado cada 1 s desde `ai-usage`) se achican vecinos de abajo hacia arriba hasta `MINS`. | Con cinco bloques en `px` fijos, expandirlos todos superaba el alto del sidebar y `docker`/`usage` quedaban fuera de pantalla. La primera versión achicaba a los vecinos al expandir y nunca los restauraba, aplastando `agents`/`system` y recortando su vista rail; limitar al bloque que crece preserva las alturas elegidas por el usuario. `window()` de herdr no expone dimensiones y el `window` importado oculta al global de GPUI. |
 | **D21** | Integrar el conmutador estilo *Alt-Tab* de Spaces y Tabs dentro de `mods/command-palette/` (`Ctrl + Shift + P`, en modo unificado y en modo dedicado `@`) respaldado por un historial MRU acotado (`shared("switcher.mru")`, máx. `24`) registrado de forma diferida desde `tabs-custom`. | Mantener un segundo overlay independiente duplicaría la UI de búsqueda y los atajos; `command-palette` es efímero (`"place": "none"`), por lo que no puede rastrear cambios de foco en reposo, mientras que `tabs-custom` permanece siempre montado y actualiza el MRU con `cx.spawn` + `cx.sleep(0)` sin timers ni mutaciones síncronas en `render()`. |
+| **D22** | Implementar el **Modo Editor estilo VS Code** mediante un bloque `editor-files` (`files-search` con `props: { slot: "editor-files" }`, `hidden: true`) al inicio de `work-body` controlado por `shared("editor.mode")`, `layout.show`/`hide` y colapso del `sidebar` a rail (`44 px`), en lugar de alternar a un segundo layout JSON. | Usar `layout.switch` recarga todos los mods del layout y descarta estado transitorio (scroll, búsquedas, cachés). Con `editor-files` dentro de `my-herdr.json`, el cambio es instantáneo y solo una instancia de `files-search` permanece visible a la vez (la oculta cancela `watchFolder` y libera sus cachés). |

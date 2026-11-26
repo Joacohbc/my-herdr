@@ -136,6 +136,22 @@
           "type": "row",
           "children": [
             {
+              "id": "editor-files",
+              "type": "block",
+              "content": {
+                "mod": "files-search",
+                "props": {
+                  "slot": "editor-files"
+                }
+              },
+              "size": {
+                "px": 270
+              },
+              "min": 200,
+              "max": 520,
+              "hidden": true
+            },
+            {
               "id": "main",
               "type": "block",
               "content": {

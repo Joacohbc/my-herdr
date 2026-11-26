@@ -110,11 +110,17 @@ function location() {
   const space = spaces().find((s) => s.active), f = focused();
   const allPanes = panes();
   const pane = f?.pane ? allPanes.find(p => p.pane === f.pane) : null;
+  const viewerRoot = pane?.mod === "file-viewer" ? shared("file-viewer.meta")?.[pane.pane]?.root : null;
   const fallbackTermPane = pane && !pane.cwd && f?.tab
     ? allPanes.find(p => p.tab === f.tab && p.cwd)
     : null;
+  const spaceTabIds = new Set((space?.tabs ?? []).map(t => t.id));
+  const spaceTermPane = !pane?.cwd && !viewerRoot && !fallbackTermPane?.cwd
+    ? allPanes.find(p => spaceTabIds.has(p.tab) && p.cwd)
+    : null;
+  const sameSpaceFocusedCwd = f?.space === space?.id ? f?.cwd : null;
   const on = f?.pane === null ? (f.terminal?.includes("/") ? f.terminal.split("/")[0] : null) : space?.machine ?? null;
-  return { cwd: pane?.cwd || fallbackTermPane?.cwd || f?.cwd || space?.folder, on, space: space?.id ?? null };
+  return { cwd: pane?.cwd || viewerRoot || fallbackTermPane?.cwd || spaceTermPane?.cwd || space?.folder || sameSpaceFocusedCwd, on, space: space?.id ?? null };
 }
 const key = () => JSON.stringify(location());
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
@@ -241,10 +247,13 @@ export default class ChangesHistory extends View {
     this.evicted = false;
     this.hibernated = false;
     this.lastGcSeq = shared("herdr.gc")?.seq ?? 0;
+    this.lastDiffOpenSeq = shared("changes.diff.open")?.seq ?? 0;
     this.lastBadgeAt = 0;
     this.lastBadgeLoc = "";
     this.badgeChecking = false;
     this.standalonePaneId = null;
+    this.standaloneTabId = p?.tab ?? null;
+    this.standaloneRenamedFor = null;
 
     if (!this.standalone) {
       this.input = InputState.new({ placeholder: "Message (Enter to commit)" });
@@ -397,12 +406,39 @@ export default class ChangesHistory extends View {
     if (!activeTabId) return false;
     const allPanes = panes().filter(p => p.mod === "changes-history");
     if (!this.standalonePaneId) {
-      const match = allPanes.find(p => p.focused) ?? allPanes.find(p => p.tab === activeTabId);
-      if (match) this.standalonePaneId = match.pane;
+      const scoped = this.standaloneTabId ? allPanes.filter(p => p.tab === this.standaloneTabId) : allPanes;
+      const match = scoped.find(p => p.focused) ?? scoped.find(p => p.tab === activeTabId) ?? allPanes.find(p => p.focused) ?? allPanes.find(p => p.tab === activeTabId);
+      if (match) {
+        this.standalonePaneId = match.pane;
+        this.standaloneTabId = match.tab;
+      }
     }
     if (!this.standalonePaneId) return true;
     const me = allPanes.find(p => p.pane === this.standalonePaneId);
+    if (me && this.standaloneFileDiff && this.standaloneFile) {
+      const wantName = `${this.standaloneFile.staged ? "Staged · " : "Diff · "}${this.standaloneFile.path}`;
+      if (!me.name && this.standaloneRenamedFor !== wantName) {
+        this.standaloneRenamedFor = wantName;
+        run("pane.rename", { pane: me.pane, name: wantName });
+      }
+    }
     return Boolean(me && me.tab === activeTabId);
+  }
+
+  checkSharedDiffOpen(cx) {
+    if (!this.standaloneFileDiff) return;
+    const req = shared("changes.diff.open");
+    if (!req || !req.seq || req.seq === this.lastDiffOpenSeq) return;
+    if (req.pane && this.standalonePaneId && req.pane !== this.standalonePaneId) return;
+    if (!req.pane && req.tab && this.standaloneTabId && req.tab !== this.standaloneTabId) return;
+    this.lastDiffOpenSeq = req.seq;
+    this.standaloneFile = req.fileDiff;
+    this.root = req.root;
+    this.on = req.on ?? null;
+    this.context = { key: JSON.stringify({ cwd: this.root, on: this.on }), cwd: this.root, on: this.on };
+    this.standaloneRenamedFor = null;
+    this.hibernated = false;
+    this.loadStandaloneFileDiff(cx);
   }
 
   checkStandaloneHibernation(cx) {
@@ -767,26 +803,32 @@ export default class ChangesHistory extends View {
     if (!path || !this.root) return;
     const f = focused();
     const tabId = f?.tab ?? null;
+    const editorMode = Boolean(shared("editor.mode")?.enabled);
     const openInNewTab = Boolean(event?.modifiers?.control || event?.modifiers?.platform);
     const fileName = path.split(/[\\/]/).pop() || path;
-    const payload = { file: path, root: this.root, on: this.on ?? null, tab: tabId, line: null, col: null, matchLen: null };
+    const payload = { file: path, root: this.root, on: this.on ?? null, tab: tabId, line: null, col: null, matchLen: null, editFirst: editorMode };
 
     if (openInNewTab) {
-      const res = run("tab.new", { name: fileName, mod: "file-viewer", props: { ...payload, tab: null, solo: true } });
-      if (res?.pane) run("pane.rename", { pane: res.pane, name: fileName });
+      run("tab.new", { name: fileName, mod: "file-viewer", props: { ...payload, tab: null, solo: true } });
       return;
     }
 
-    const existing = tabId ? panes().find(p => p.tab === tabId && p.mod === "file-viewer") : null;
-    if (existing) {
+    const tabPanes = tabId ? panes().filter(p => p.tab === tabId) : [];
+    const existing = tabPanes.find(p => p.pane === f?.pane && p.mod === "file-viewer") ?? tabPanes.find(p => p.mod === "file-viewer");
+    const meta = shared("file-viewer.meta") ?? {};
+    if (existing && !meta[existing.pane]?.dirty) {
       const prevSeq = shared("file-viewer.open")?.seq ?? 0;
-      setShared("file-viewer.open", { ...payload, pane: existing.pane, seq: prevSeq + 1 });
+      setShared("file-viewer.open", { ...payload, pane: existing.pane, replace: true, seq: prevSeq + 1 });
       run("pane.focus", { pane: existing.pane });
       run("pane.rename", { pane: existing.pane, name: fileName });
+      if (tabPanes.length === 1) run("tab.rename", { id: tabId, name: fileName });
       return;
     }
-    const res = run("pane.split", { direction: "right", mod: "file-viewer", props: payload });
-    if (res?.pane) run("pane.rename", { pane: res.pane, name: fileName });
+    if (existing && meta[existing.pane]?.dirty) {
+      run("tab.new", { name: fileName, mod: "file-viewer", props: { ...payload, tab: null, solo: true } });
+      return;
+    }
+    run("pane.split", { direction: "right", mod: "file-viewer", props: payload });
   }
 
   async loadDiff(target, context) {
@@ -820,7 +862,7 @@ export default class ChangesHistory extends View {
     }
   }
 
-  openFileDiffInNewTab(file) {
+  openFileDiff(file, openInNewTab = false) {
     if (!file || !this.root) return;
     const plainFile = {
       path: file.path,
@@ -830,14 +872,47 @@ export default class ChangesHistory extends View {
     };
     const fileName = file.path.split("/").pop() || file.path;
     const tabTitle = `${plainFile.staged ? "Staged: " : ""}${fileName}`.slice(0, 32);
-    const res = run("tab.new", {
-      name: tabTitle,
-      mod: "changes-history",
-      props: { fileDiff: plainFile, root: this.root, on: this.on ?? null },
-    });
-    if (res?.pane) {
-      run("pane.rename", { pane: res.pane, name: `${plainFile.staged ? "Staged · " : "Diff · "}${file.path}` });
+    const paneTitle = `${plainFile.staged ? "Staged · " : "Diff · "}${file.path}`;
+
+    if (openInNewTab) {
+      run("tab.new", {
+        name: tabTitle,
+        mod: "changes-history",
+        props: { fileDiff: plainFile, root: this.root, on: this.on ?? null },
+      });
+      return;
     }
+
+    const f = focused();
+    const tabId = f?.tab ?? null;
+    const tabPanes = tabId ? panes().filter(p => p.tab === tabId) : [];
+    const existing = tabPanes.find(p => p.pane === f?.pane && p.mod === "changes-history") ?? tabPanes.find(p => p.mod === "changes-history");
+
+    if (existing) {
+      const prevSeq = shared("changes.diff.open")?.seq ?? 0;
+      setShared("changes.diff.open", {
+        pane: existing.pane,
+        tab: tabId,
+        fileDiff: plainFile,
+        root: this.root,
+        on: this.on ?? null,
+        seq: prevSeq + 1,
+      });
+      run("pane.focus", { pane: existing.pane });
+      run("pane.rename", { pane: existing.pane, name: paneTitle });
+      if (tabPanes.length === 1) run("tab.rename", { id: tabId, name: tabTitle });
+      return;
+    }
+
+    run("pane.split", {
+      direction: "right",
+      mod: "changes-history",
+      props: { fileDiff: plainFile, root: this.root, on: this.on ?? null, tab: tabId },
+    });
+  }
+
+  openFileDiffInNewTab(file) {
+    this.openFileDiff(file, true);
   }
 
   loadStandaloneFileDiff(cx) {
@@ -1373,13 +1448,10 @@ export default class ChangesHistory extends View {
         else if (this.hoveredRow === rowId) this.hoveredRow = null;
         cx.notify();
       })
-      .tooltip(`${file.path}\nClick: inline diff · Ctrl+Click: open diff in new tab`)
-      .on_click((e, cx) => {
-        if (e?.modifiers?.control || e?.modifiers?.platform) {
-          this.openFileDiffInNewTab(file);
-        } else {
-          this.pickDiff(file, cx);
-        }
+      .tooltip(`${file.path}\nClick: open diff in current tab · Ctrl+Click: open diff in new tab`)
+      .on_click((e) => {
+        const openInNewTab = Boolean(e?.modifiers?.control || e?.modifiers?.platform);
+        this.openFileDiff(file, openInNewTab);
       })
       .child(image(fileIcon(name)).w(16).h(16).flex_none())
       .child(div().flex_none().max_w(165).truncate().text_size(12).text_color(t.foreground).child(name))
@@ -1701,7 +1773,10 @@ export default class ChangesHistory extends View {
         .child(this.renderCommitDetail(t, size));
     }
     if (this.standaloneFileDiff && this.standaloneFile) {
-      if (!checking()) this.checkStandaloneHibernation(cx);
+      if (!checking()) {
+        this.checkStandaloneHibernation(cx);
+        this.checkSharedDiffOpen(cx);
+      }
       return this.renderStandaloneFileDiff(t, size).when(Boolean(fontFamily), el => el.font_family(fontFamily));
     }
     if (this.standalonePr && this.selectedPr) {
