@@ -91,7 +91,7 @@ Monitor en tiempo real de puertos en escucha en la barra lateral izquierda con c
   - Diferencia puertos de sistema (puertos conocidos como DNS `53`, mDNS `5353`, CUPS `631`, Tailscale `41641`, `127.0.0.53/54`, daemons OS) con toggle `Sys N`.
   - Identifica protocolos (`HTTP`, `HTTPS`, `DB`, `MQ`, `TCP`, `UDP`) mediante tabla conocida + sonda HTTP/HTTPS perezosa (`curl`, caché acotada `MAX_PROBE_CACHE = 128`, limpiada en `herdr.gc`), filtros por protocolo (`All | HTTP | DB | TCP | UDP`) y badge de exposición (`localhost`, `0.0.0.0`, `tailscale`).
   - Clic en puertos HTTP/HTTPS abre el modal `web-launcher` pre-rellenado; clic en otros puertos copia `host:port`. Publica `shared("ports.http")` (máx. `32`).
-  - Colapsable a barra de `64 px` (`Ports ▸` / `Ports ▾` vía `layout.resize`) restaurando su última altura expandida en `px`, manejador superior de *resize por empuje* (**D17**) con descolapso automático al agrandarse, y modo rail compacto (`width < 140 px`) con iconos + número de puerto (en rail solo se muestra `N/A`, sin chips de puertos).
+  - Colapsable a barra de `64 px` (`Ports ▸` / `Ports ▾` vía `layout.resize`) restaurando su última altura expandida en `px`, manejador superior de *resize por empuje* (**D17**) con descolapso automático al agrandarse, y modo rail compacto (`width < 140 px`) con iconos + número de puerto (en rail solo se muestra el icono `icons/port.svg` y `N/A` debajo, sin chips de puertos).
 
 ### 1.9 `agents-custom` (`mods/agents-custom/`)
 Clon personalizado del panel `agents` de la barra lateral izquierda.

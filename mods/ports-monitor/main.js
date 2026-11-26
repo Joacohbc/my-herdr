@@ -28,6 +28,7 @@ import {
 const ACTIVE_POLL_MS = 1_500;
 const UNFOCUSED_POLL_MS = 5_000;
 const RAIL_WIDTH_PX = 140;
+const PORTS_ICON = "mods/ports-monitor/icons/port.svg";
 
 const PROTO_FILTERS = [
   { id: "ALL", label: "All" },
@@ -253,19 +254,9 @@ export default class PortsMonitor extends View {
       .size_full()
       .items_center()
       .py(6)
-      .gap(4)
-      .overflow_y_scrollbar()
-      .child(
-        div()
-          .id("pm-rail-head")
-          .px(4)
-          .py(2)
-          .rounded(4)
-          .text_size(9.5)
-          .font_semibold()
-          .text_color(t.muted)
-          .child("N/A"),
-      );
+      .gap(3)
+      .child(svg(PORTS_ICON).size(16).flex_none().text_color(t.muted))
+      .child(div().id("pm-rail-head").text_size(9.5).font_semibold().text_color(t.dim).child("N/A"));
   }
 
   render(cx) {
