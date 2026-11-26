@@ -486,8 +486,20 @@ export default class DockerMonitor extends View {
       .cursor_pointer()
       .tooltip(`Docker: ${totals.running} running · CPU ${formatPct(totals.cpu)} · RAM ${formatBytes(totals.mem)}`)
       .on_click((_e, cx) => this.toggleCollapsed(cx))
-      .child(image(DOCKER_ICON).w(16).h(16))
-      .child(div().text_size(9.5).text_color(t.muted).child(String(totals.running)));
+      .child(
+        v_flex()
+          .w(34)
+          .py(3)
+          .rounded(6)
+          .items_center()
+          .gap(2)
+          .overflow_hidden()
+          .bg(t.surface)
+          .border_1()
+          .border_color(t.border)
+          .child(div().text_size(8.5).font_semibold().text_color(this.error ? t.blocked : t.foreground).child(this.error ? "C —" : `C ${Math.round(totals.cpu)}%`))
+          .child(div().text_size(8.5).font_semibold().text_color(this.error ? t.blocked : t.foreground).child(this.error ? "R —" : `R ${formatBytes(totals.mem)}`)),
+      );
   }
 
   renderListBody(t, visible) {

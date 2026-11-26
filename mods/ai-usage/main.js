@@ -433,7 +433,7 @@ export default class AiUsage extends View {
       .tooltip(this.data ? this.miniSummaryText() : "AI Usage")
       .on_click((_e, cx) => this.toggleCollapsed(cx))
       .child(svg(USAGE_ICON).size(15).text_color(t.muted))
-      .when(Boolean(fiveHour), el => el.child(div().text_size(9.5).text_color(quotaColor(fiveHour.pct, t)).child(`${Math.round(fiveHour.pct)}%`)));
+      .child(div().text_size(9.5).text_color(fiveHour ? quotaColor(fiveHour.pct, t) : t.dim).child(fiveHour ? `${Math.round(fiveHour.pct)}%` : "N/A"));
   }
 
   renderBody(t) {
