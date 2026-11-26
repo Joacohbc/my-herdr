@@ -422,7 +422,6 @@ export default class AiUsage extends View {
   }
 
   renderRail(t) {
-    const fiveHour = this.data?.claude?.quota?.fiveHour;
     return v_flex()
       .id("usage-rail")
       .size_full()
@@ -433,7 +432,7 @@ export default class AiUsage extends View {
       .tooltip(this.data ? this.miniSummaryText() : "AI Usage")
       .on_click((_e, cx) => this.toggleCollapsed(cx))
       .child(svg(USAGE_ICON).size(15).text_color(t.muted))
-      .child(div().text_size(9.5).text_color(fiveHour ? quotaColor(fiveHour.pct, t) : t.dim).child(fiveHour ? `${Math.round(fiveHour.pct)}%` : "N/A"));
+      .child(div().text_size(9.5).text_color(t.dim).child("N/A"));
   }
 
   renderBody(t) {

@@ -268,7 +268,7 @@ export default class PortsMonitor extends View {
           .cursor_pointer()
           .hover(s => s.bg(t.hover).text_color(t.foreground))
           .on_click((_e, cx) => this.toggleCollapsed(cx))
-          .child(visible.length === 0 ? "N/A" : this.collapsed ? "P▸" : `P:${visible.length}`),
+          .child("N/A"),
       )
       .when(!this.collapsed, el =>
         el.children(

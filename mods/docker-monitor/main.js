@@ -486,6 +486,7 @@ export default class DockerMonitor extends View {
       .cursor_pointer()
       .tooltip(`Docker: ${totals.running} running · CPU ${formatPct(totals.cpu)} · RAM ${formatBytes(totals.mem)}`)
       .on_click((_e, cx) => this.toggleCollapsed(cx))
+      .child(image(DOCKER_ICON).w(16).h(16).flex_none())
       .child(
         v_flex()
           .w(34)
