@@ -247,8 +247,7 @@ export default class PortsMonitor extends View {
     });
   }
 
-  renderRail(t, visible) {
-    const topPorts = visible.slice(0, 12);
+  renderRail(t) {
     return v_flex()
       .id("pm-rail")
       .size_full()
@@ -265,32 +264,7 @@ export default class PortsMonitor extends View {
           .text_size(9.5)
           .font_semibold()
           .text_color(t.muted)
-          .cursor_pointer()
-          .hover(s => s.bg(t.hover).text_color(t.foreground))
-          .on_click((_e, cx) => this.toggleCollapsed(cx))
           .child("N/A"),
-      )
-      .when(!this.collapsed, el =>
-        el.children(
-          topPorts.map(entry =>
-            v_flex()
-              .id(`pm-rail-${entry.key}`)
-              .w(34)
-              .py(3)
-              .gap(1)
-              .items_center()
-              .rounded(5)
-              .bg(t.surface)
-              .border_1()
-              .border_color(t.border)
-              .cursor_pointer()
-              .hover(s => s.bg(t.hover).border_color(t.accent))
-              .tooltip(`${entry.proto} :${entry.port} (${entry.exposure.label}) — ${entry.service}`)
-              .on_click((_e, cx) => this.handleRowClick(entry, cx))
-              .child(renderPortIcon(entry, 15, protoColor(entry, t)))
-              .child(div().text_size(8.5).text_color(t.foreground).child(String(entry.port))),
-          ),
-        ),
       );
   }
 
@@ -344,7 +318,7 @@ export default class PortsMonitor extends View {
         this.endDrag();
         cx.notify();
       })
-      .when(isRail, el => el.child(this.renderRail(t, visible)))
+      .when(isRail, el => el.child(this.renderRail(t)))
       .when(!isRail, el =>
         el
           .child(
