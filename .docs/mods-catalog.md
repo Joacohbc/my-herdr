@@ -58,7 +58,7 @@ Panel de Source Control estilo VS Code compatible con repositorios locales y SSH
 Encabezado unificado para todos los paneles del layout `my-herdr`.
 
 - **Archivos:** `main.js`, `mod.json` (incluye entradas `palette` para `Close tab` y `Reopen closed tab`), `close.svg`, `split-down.svg`, `split-right.svg`, `zoom.svg`, `unzoom.svg`.
-- **Responsabilidades:** muestra icono, nombre (con `* ` si `meta.dirty`), subtítulo, estado del agente, controles de `file-viewer` (`Preview`/`Raw`, `Wrap`, zoom del visor) o zoom global en terminales, y los 4 botones de acción montados de forma fija (`opacity: 0.4` en reposo → `1` en hover/zoom para evitar `layout shift`). Gestiona el historial acotado (máx. 8) de cierre/reapertura de paneles y pestañas y poda `file-viewer.meta` huérfano.
+- **Responsabilidades:** muestra icono, nombre (con `* ` si `meta.dirty`), subtítulo, estado del agente, controles de `file-viewer` (`Preview`/`Raw`, `Wrap`, zoom del visor) o zoom global en terminales, y los 4 botones de acción montados de forma fija (`opacity: 0.4` en reposo → `1` en hover/zoom para evitar `layout shift`). Gestiona el historial acotado (máx. 8) de cierre/reapertura de paneles y pestañas (incluyendo visores `file-viewer` y diffs de archivo de `changes-history`) y poda `file-viewer.meta` y `changes.pane.meta` huérfanos.
 
 ### 1.5 `tabs-custom` (`mods/tabs-custom/`)
 Clon personalizado de la barra de pestañas `tabs`.

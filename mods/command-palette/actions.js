@@ -24,21 +24,27 @@ export function aliasesFilePath() {
 export function getActiveLocation() {
   const space = spaces().find(s => s.active);
   const f = focused();
+  const sameSpaceFocus = f?.space === space?.id ? f : null;
   const allPanes = panes();
-  const pane = f?.pane ? allPanes.find(p => p.pane === f.pane) : null;
+  const activeTabId = sameSpaceFocus?.tab ?? space?.tabs?.find(t => t.active)?.id ?? null;
+  const pane = sameSpaceFocus?.pane
+    ? allPanes.find(p => p.pane === sameSpaceFocus.pane)
+    : (activeTabId ? allPanes.find(p => p.tab === activeTabId && p.focused) ?? allPanes.find(p => p.tab === activeTabId) : null);
   const viewerRoot = pane?.mod === "file-viewer" ? shared("file-viewer.meta")?.[pane.pane]?.root : null;
-  const fallbackTermPane = pane && !pane.cwd && f?.tab
-    ? allPanes.find(p => p.tab === f.tab && p.cwd)
+  const changesRoot = pane?.mod === "changes-history" ? shared("changes.pane.meta")?.[pane.pane]?.root : null;
+  const modRoot = viewerRoot || changesRoot;
+  const fallbackTermPane = pane && !pane.cwd && activeTabId
+    ? allPanes.find(p => p.tab === activeTabId && p.cwd)
     : null;
   const spaceTabIds = new Set((space?.tabs ?? []).map(t => t.id));
-  const spaceTermPane = !pane?.cwd && !viewerRoot && !fallbackTermPane?.cwd
+  const spaceTermPane = !pane?.cwd && !modRoot && !fallbackTermPane?.cwd
     ? allPanes.find(p => spaceTabIds.has(p.tab) && p.cwd)
     : null;
-  const sameSpaceFocusedCwd = f?.space === space?.id ? f?.cwd : null;
-  const on = f?.pane === null
-    ? (f.terminal?.includes("/") ? f.terminal.split("/")[0] : null)
+  const sameSpaceFocusedCwd = sameSpaceFocus?.cwd ?? null;
+  const on = sameSpaceFocus && sameSpaceFocus.pane === null
+    ? (sameSpaceFocus.terminal?.includes("/") ? sameSpaceFocus.terminal.split("/")[0] : null)
     : space?.machine ?? null;
-  const cwd = pane?.cwd || viewerRoot || fallbackTermPane?.cwd || spaceTermPane?.cwd || space?.folder || sameSpaceFocusedCwd || "";
+  const cwd = pane?.cwd || modRoot || fallbackTermPane?.cwd || spaceTermPane?.cwd || space?.folder || sameSpaceFocusedCwd || "";
   return { cwd, on, space: space?.id ?? null };
 }
 
@@ -162,12 +168,15 @@ export async function openInTerminalEditor({ absPath, folder, on, place = "tab",
 
 export function openInFileViewer({ relPath, root, on, name }) {
   const editorMode = Boolean(shared("editor.mode")?.enabled);
+  const activeSpace = spaces().find(s => s.active);
   const f = focused();
-  const tabId = f?.tab ?? null;
+  const sameSpaceFocus = f?.space === activeSpace?.id ? f : null;
+  const tabId = sameSpaceFocus?.tab ?? activeSpace?.tabs?.find(t => t.active)?.id ?? null;
+  const focusedPaneId = sameSpaceFocus?.pane ?? null;
   const payload = { file: relPath, root, on: on ?? null, tab: tabId, line: null, col: null, matchLen: null, editFirst: editorMode };
   const allPanes = panes();
   const tabPanes = tabId ? allPanes.filter(p => p.tab === tabId) : [];
-  const existing = tabPanes.find(p => p.pane === f?.pane && p.mod === "file-viewer") ?? tabPanes.find(p => p.mod === "file-viewer");
+  const existing = tabPanes.find(p => p.pane === focusedPaneId && p.mod === "file-viewer") ?? tabPanes.find(p => p.mod === "file-viewer");
   const meta = shared("file-viewer.meta") ?? {};
 
   if (existing && !meta[existing.pane]?.dirty) {

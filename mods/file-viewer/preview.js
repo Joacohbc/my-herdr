@@ -197,14 +197,14 @@ function upscaleSvgForPreview(svgText) {
   return { text: updated, aspect: outW / outH };
 }
 
-export async function stageImagePreview(fullPath, on, token) {
+export async function stageImagePreview(fullPath, on, token, rawSvgOverride = null) {
   const ext = getExtension(fullPath) || "png";
   const relPath = `data/fv-preview/img-${token}.${ext}`;
   const dstAbs = `${appHome()}/${relPath}`;
   const dir = previewDir();
 
   if (ext === "svg") {
-    const rawSvg = await readTextFile(fullPath, { on });
+    const rawSvg = rawSvgOverride !== null ? rawSvgOverride : await readTextFile(fullPath, { on });
     if (rawSvg === null) throw new Error("SVG file is no longer available");
     const { text: hiResSvg, aspect } = upscaleSvgForPreview(rawSvg);
     await exec("mkdir", ["-p", dir], { timeout: 3000 });

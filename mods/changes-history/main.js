@@ -4,7 +4,7 @@ import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, setting
 import { fileIcon, releaseIconCache } from "./material-icons.js";
 import { listPullRequests, loadPullRequestDetail, checkoutPullRequest, buildRemoteBranchUrl } from "./github.js";
 import { SCM_COLORS, DIFF_COLORS, scmColor, parseStatusZ, parseNameStatusZ } from "./scm-status.js";
-import { splitDiff, buildHunkPatch, applyHunk } from "./hunks.js";
+import { MAX_PATCH_BYTES, utf8ByteLength, splitDiff, buildHunkPatch, applyHunk } from "./hunks.js";
 import { stashPushArgs, stashApplyArgs, loadStashFiles, loadStashFileDiff } from "./stash.js";
 import { openInVSCode } from "./vscode.js";
 
@@ -94,21 +94,36 @@ async function repoStatus(root, on, { after, visiting, urgent, allowInactive }, 
   return null;
 }
 
+function getActiveTabContext() {
+  const activeSpace = spaces().find(s => s.active) ?? null;
+  const f = focused();
+  const sameSpaceFocus = f?.space === activeSpace?.id ? f : null;
+  const tabId = sameSpaceFocus?.tab ?? activeSpace?.tabs?.find(t => t.active)?.id ?? null;
+  const focusedPaneId = sameSpaceFocus?.pane ?? null;
+  return { activeSpace, sameSpaceFocus, tabId, focusedPaneId };
+}
+
 function location() {
-  const space = spaces().find((s) => s.active), f = focused();
+  const { activeSpace: space, sameSpaceFocus, tabId } = getActiveTabContext();
   const allPanes = panes();
-  const pane = f?.pane ? allPanes.find(p => p.pane === f.pane) : null;
+  const pane = sameSpaceFocus?.pane
+    ? allPanes.find(p => p.pane === sameSpaceFocus.pane)
+    : (tabId ? allPanes.find(p => p.tab === tabId && p.focused) ?? allPanes.find(p => p.tab === tabId) : null);
   const viewerRoot = pane?.mod === "file-viewer" ? shared("file-viewer.meta")?.[pane.pane]?.root : null;
-  const fallbackTermPane = pane && !pane.cwd && f?.tab
-    ? allPanes.find(p => p.tab === f.tab && p.cwd)
+  const changesRoot = pane?.mod === "changes-history" ? shared("changes.pane.meta")?.[pane.pane]?.root : null;
+  const modRoot = viewerRoot || changesRoot;
+  const fallbackTermPane = pane && !pane.cwd && tabId
+    ? allPanes.find(p => p.tab === tabId && p.cwd)
     : null;
   const spaceTabIds = new Set((space?.tabs ?? []).map(t => t.id));
-  const spaceTermPane = !pane?.cwd && !viewerRoot && !fallbackTermPane?.cwd
+  const spaceTermPane = !pane?.cwd && !modRoot && !fallbackTermPane?.cwd
     ? allPanes.find(p => spaceTabIds.has(p.tab) && p.cwd)
     : null;
-  const sameSpaceFocusedCwd = f?.space === space?.id ? f?.cwd : null;
-  const on = f?.pane === null ? (f.terminal?.includes("/") ? f.terminal.split("/")[0] : null) : space?.machine ?? null;
-  return { cwd: pane?.cwd || viewerRoot || fallbackTermPane?.cwd || spaceTermPane?.cwd || space?.folder || sameSpaceFocusedCwd, on, space: space?.id ?? null };
+  const sameSpaceFocusedCwd = sameSpaceFocus?.cwd ?? null;
+  const on = sameSpaceFocus && sameSpaceFocus.pane === null
+    ? (sameSpaceFocus.terminal?.includes("/") ? sameSpaceFocus.terminal.split("/")[0] : null)
+    : space?.machine ?? null;
+  return { cwd: pane?.cwd || modRoot || fallbackTermPane?.cwd || spaceTermPane?.cwd || space?.folder || sameSpaceFocusedCwd, on, space: space?.id ?? null };
 }
 const key = () => JSON.stringify(location());
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
@@ -176,7 +191,8 @@ function parseDiffOutput(stdout) {
   const lines = [];
   for (const hunk of parsed.hunks) {
     if (hunk.bodyStart >= MAX_DIFF_LINES) break;
-    const isTruncated = hunk.bodyEnd > MAX_DIFF_LINES;
+    const exceedsLines = hunk.bodyEnd > MAX_DIFF_LINES;
+    const isTruncated = exceedsLines || utf8ByteLength(buildHunkPatch(parsed.header, hunk)) > MAX_PATCH_BYTES;
     boundedHunks.push(isTruncated ? { ...hunk, lines: [], truncated: true } : { ...hunk, truncated: false });
     if (lines.length < MAX_DIFF_LINES) lines.push(truncateDiffLine(hunk.header));
     for (const bodyLine of hunk.lines) {
@@ -409,6 +425,13 @@ export default class ChangesHistory extends View {
     this.input?.release();
     this.graphSearchInput?.release();
     this.prSearchInput?.release();
+    if (this.standalonePaneId) {
+      const all = { ...(shared("changes.pane.meta") ?? {}) };
+      if (this.standalonePaneId in all) {
+        delete all[this.standalonePaneId];
+        setShared("changes.pane.meta", all);
+      }
+    }
   }
 
   publishBadgeCount(count, spaceId) {
@@ -486,7 +509,46 @@ export default class ChangesHistory extends View {
     this.evicted = true;
   }
 
-  isStandaloneVisible() {
+  publishStandaloneMeta(cx = null, fromRender = false) {
+    if (!this.standalone || !this.standalonePaneId || !this.root) return;
+    const kind = this.standaloneFileDiff ? "file" : this.standaloneCommit ? "commit" : "pr";
+    const fileDiff = this.standaloneFileDiff && this.standaloneFile
+      ? {
+          path: this.standaloneFile.path,
+          origPath: this.standaloneFile.origPath || "",
+          staged: Boolean(this.standaloneFile.staged),
+          untracked: Boolean(this.standaloneFile.untracked),
+          conflict: Boolean(this.standaloneFile.conflict),
+          status: this.standaloneFile.status || "M",
+        }
+      : null;
+    const all = shared("changes.pane.meta") ?? {};
+    const prev = all[this.standalonePaneId];
+    if (
+      prev &&
+      prev.kind === kind &&
+      prev.root === this.root &&
+      (prev.on ?? null) === (this.on ?? null) &&
+      prev.fileDiff?.path === fileDiff?.path &&
+      prev.fileDiff?.staged === fileDiff?.staged &&
+      prev.fileDiff?.status === fileDiff?.status
+    ) {
+      return;
+    }
+    const paneId = this.standalonePaneId;
+    const entry = { kind, root: this.root, on: this.on ?? null, fileDiff };
+    if (fromRender && cx) {
+      cx.spawn(async () => {
+        await cx.sleep(0);
+        const cur = shared("changes.pane.meta") ?? {};
+        setShared("changes.pane.meta", { ...cur, [paneId]: entry });
+      });
+      return;
+    }
+    setShared("changes.pane.meta", { ...all, [paneId]: entry });
+  }
+
+  isStandaloneVisible(cx = null, fromRender = false) {
     if (window()?.visible === false) return false;
     const activeSpace = spaces().find(s => s.active);
     const activeTabId = activeSpace?.tabs?.find(t => t.active)?.id;
@@ -501,6 +563,7 @@ export default class ChangesHistory extends View {
       }
     }
     if (!this.standalonePaneId) return true;
+    this.publishStandaloneMeta(cx, fromRender);
     const me = allPanes.find(p => p.pane === this.standalonePaneId);
     if (me && this.standaloneFileDiff && this.standaloneFile) {
       const wantName = `${this.standaloneFile.staged ? "Staged · " : "Diff · "}${this.standaloneFile.path}`;
@@ -528,6 +591,7 @@ export default class ChangesHistory extends View {
     this.hunkOpSeq += 1;
     this.hunkBusy = false;
     this.hibernated = false;
+    this.publishStandaloneMeta(cx, fromRender);
     this.loadStandaloneFileDiff(cx, fromRender);
   }
 
@@ -536,7 +600,7 @@ export default class ChangesHistory extends View {
     const forceGc = gcSeq !== this.lastGcSeq;
     this.lastGcSeq = gcSeq;
 
-    if (this.isStandaloneVisible()) {
+    if (this.isStandaloneVisible(cx, fromRender)) {
       this.hiddenSince = 0;
       if (this.hibernated) {
         this.hibernated = false;
@@ -1030,6 +1094,7 @@ export default class ChangesHistory extends View {
       this.standaloneRenamedFor = wantName;
       run("pane.rename", { pane: this.standalonePaneId, name: wantName });
     }
+    this.publishStandaloneMeta(cx, false);
     this.loadStandaloneFileDiff(cx);
   }
 
@@ -1046,21 +1111,37 @@ export default class ChangesHistory extends View {
 
   openInViewer(path, event) {
     if (!path || !this.root) return;
-    const f = focused();
-    const tabId = f?.tab ?? null;
+    const { activeSpace, tabId, focusedPaneId } = getActiveTabContext();
     const editorMode = Boolean(shared("editor.mode")?.enabled);
     const openInNewTab = Boolean(event?.modifiers?.control || event?.modifiers?.platform);
     const fileName = path.split(/[\\/]/).pop() || path;
     const payload = { file: path, root: this.root, on: this.on ?? null, tab: tabId, line: null, col: null, matchLen: null, editFirst: editorMode };
+    const allPanes = panes();
+    const meta = shared("file-viewer.meta") ?? {};
+
+    const openTabDeduplicated = () => {
+      const spaceTabIds = new Set((activeSpace?.tabs ?? []).map(t => t.id));
+      const existingTabPane = allPanes.find(p => {
+        if (p.mod !== "file-viewer" || !spaceTabIds.has(p.tab)) return false;
+        const pm = meta[p.pane];
+        return pm?.file === path && pm.root === this.root && (pm.on ?? null) === (this.on ?? null);
+      });
+      if (existingTabPane) {
+        run("tab.select", { id: existingTabPane.tab });
+        run("pane.focus", { pane: existingTabPane.pane });
+        return;
+      }
+      const res = run("tab.new", { name: fileName, mod: "file-viewer", props: { ...payload, tab: null, solo: true } });
+      if (res?.pane) run("pane.rename", { pane: res.pane, name: fileName });
+    };
 
     if (openInNewTab) {
-      run("tab.new", { name: fileName, mod: "file-viewer", props: { ...payload, tab: null, solo: true } });
+      openTabDeduplicated();
       return;
     }
 
-    const tabPanes = tabId ? panes().filter(p => p.tab === tabId) : [];
-    const existing = tabPanes.find(p => p.pane === f?.pane && p.mod === "file-viewer") ?? tabPanes.find(p => p.mod === "file-viewer");
-    const meta = shared("file-viewer.meta") ?? {};
+    const tabPanes = tabId ? allPanes.filter(p => p.tab === tabId) : [];
+    const existing = tabPanes.find(p => p.pane === focusedPaneId && p.mod === "file-viewer") ?? tabPanes.find(p => p.mod === "file-viewer");
     if (existing && !meta[existing.pane]?.dirty) {
       const prevSeq = shared("file-viewer.open")?.seq ?? 0;
       setShared("file-viewer.open", { ...payload, pane: existing.pane, replace: true, seq: prevSeq + 1 });
@@ -1070,10 +1151,11 @@ export default class ChangesHistory extends View {
       return;
     }
     if (existing && meta[existing.pane]?.dirty) {
-      run("tab.new", { name: fileName, mod: "file-viewer", props: { ...payload, tab: null, solo: true } });
+      openTabDeduplicated();
       return;
     }
-    run("pane.split", { direction: "right", mod: "file-viewer", props: payload });
+    const res = run("pane.split", { direction: "right", mod: "file-viewer", props: payload });
+    if (res?.pane) run("pane.rename", { pane: res.pane, name: fileName });
   }
 
   async loadDiff(target, context) {
@@ -1103,19 +1185,30 @@ export default class ChangesHistory extends View {
     const tabTitle = `${plainFile.staged ? "Staged: " : ""}${fileName}`.slice(0, 32);
     const paneTitle = `${plainFile.staged ? "Staged · " : "Diff · "}${file.path}`;
 
-    if (openInNewTab) {
-      run("tab.new", {
+    const openNewDiffTab = () => {
+      const res = run("tab.new", {
         name: tabTitle,
         mod: "changes-history",
         props: { fileDiff: plainFile, root: this.root, on: this.on ?? null },
       });
+      if (res?.pane) run("pane.rename", { pane: res.pane, name: paneTitle });
+    };
+
+    if (openInNewTab) {
+      openNewDiffTab();
       return;
     }
 
-    const f = focused();
-    const tabId = f?.tab ?? null;
+    const { tabId, focusedPaneId } = getActiveTabContext();
     const tabPanes = tabId ? panes().filter(p => p.tab === tabId) : [];
-    const existing = tabPanes.find(p => p.pane === f?.pane && p.mod === "changes-history") ?? tabPanes.find(p => p.mod === "changes-history");
+    const changesMeta = shared("changes.pane.meta") ?? {};
+    const isFileDiffPane = (p) => {
+      if (p.mod !== "changes-history") return false;
+      const kind = changesMeta[p.pane]?.kind;
+      if (kind) return kind === "file";
+      return Boolean(p.name?.startsWith("Diff · ") || p.name?.startsWith("Staged · "));
+    };
+    const existing = tabPanes.find(p => p.pane === focusedPaneId && isFileDiffPane(p)) ?? tabPanes.find(isFileDiffPane);
 
     if (existing) {
       const prevSeq = shared("changes.diff.open")?.seq ?? 0;
@@ -1133,11 +1226,20 @@ export default class ChangesHistory extends View {
       return;
     }
 
-    run("pane.split", {
+    const onlyPane = tabPanes.length === 1 ? tabPanes[0] : null;
+    const isCommitOrPrOnly = onlyPane?.mod === "changes-history" && !isFileDiffPane(onlyPane);
+    const isDirtyViewerOnly = onlyPane?.mod === "file-viewer" && Boolean(shared("file-viewer.meta")?.[onlyPane.pane]?.dirty);
+    if (!tabId || isCommitOrPrOnly || isDirtyViewerOnly) {
+      openNewDiffTab();
+      return;
+    }
+
+    const res = run("pane.split", {
       direction: "right",
       mod: "changes-history",
       props: { fileDiff: plainFile, root: this.root, on: this.on ?? null, tab: tabId },
     });
+    if (res?.pane) run("pane.rename", { pane: res.pane, name: paneTitle });
   }
 
   openFileDiffInNewTab(file) {
@@ -1829,31 +1931,32 @@ export default class ChangesHistory extends View {
       );
   }
 
-  renderPendingConfirm(t) {
-    const confirmRequest = this.pendingConfirm;
-    const isDelete = confirmRequest.kind === "discard" && confirmRequest.file?.untracked;
-    const confirmMeta = {
-      discard: {
-        label: isDelete ? `Delete "${confirmRequest.file.path}"?` : `Discard changes in "${confirmRequest.file.path}"?`,
+  describePendingConfirm(confirmRequest) {
+    if (confirmRequest.kind === "discard") {
+      const filePath = confirmRequest.file?.path ?? "";
+      const isDelete = Boolean(confirmRequest.file?.untracked);
+      return {
+        label: isDelete ? `Delete "${filePath}"?` : `Discard changes in "${filePath}"?`,
         confirmText: isDelete ? "Delete" : "Discard",
-      },
-      "drop-stash": {
-        label: `Drop stash "${confirmRequest.stash?.ref}"?`,
-        confirmText: "Drop",
-      },
-      "revert-hunk": {
-        label: `Revert block #${(confirmRequest.index ?? 0) + 1}?`,
-        confirmText: "Revert",
-      },
-      "clear-stashes": {
-        label: `Clear all ${this.stashes.length} stashes?`,
-        confirmText: "Clear",
-      },
-      "amend-pushed": {
-        label: "HEAD is already pushed to upstream. Amend anyway?",
-        confirmText: "Amend",
-      },
-    }[confirmRequest.kind] ?? { label: "Confirm action?", confirmText: "Confirm" };
+      };
+    }
+    if (confirmRequest.kind === "drop-stash") {
+      return { label: `Drop stash "${confirmRequest.stash?.ref ?? ""}"?`, confirmText: "Drop" };
+    }
+    if (confirmRequest.kind === "revert-hunk") {
+      return { label: `Revert block #${(confirmRequest.index ?? 0) + 1}?`, confirmText: "Revert" };
+    }
+    if (confirmRequest.kind === "clear-stashes") {
+      return { label: `Clear all ${this.stashes.length} stashes?`, confirmText: "Clear" };
+    }
+    if (confirmRequest.kind === "amend-pushed") {
+      return { label: "HEAD is already pushed to upstream. Amend anyway?", confirmText: "Amend" };
+    }
+    return { label: "Confirm action?", confirmText: "Confirm" };
+  }
+
+  renderPendingConfirm(t) {
+    const confirmMeta = this.describePendingConfirm(this.pendingConfirm);
 
     return v_flex()
       .flex_none()
@@ -2034,7 +2137,7 @@ export default class ChangesHistory extends View {
     return h_flex()
       .flex_1()
       .min_h(0)
-      .font_family(settings().font_family ?? "JetBrains Mono")
+      .font_family(settings().font_family ?? settings().font ?? "JetBrains Mono")
       .text_size(size)
       .child(
         div()

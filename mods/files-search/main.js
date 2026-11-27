@@ -86,21 +86,36 @@ async function repoStatus(root, on, { after, visiting, urgent, allowInactive }, 
   return null;
 }
 
+function getActiveTabContext() {
+  const activeSpace = spaces().find(s => s.active) ?? null;
+  const f = focused();
+  const sameSpaceFocus = f?.space === activeSpace?.id ? f : null;
+  const tabId = sameSpaceFocus?.tab ?? activeSpace?.tabs?.find(t => t.active)?.id ?? null;
+  const focusedPaneId = sameSpaceFocus?.pane ?? null;
+  return { activeSpace, sameSpaceFocus, tabId, focusedPaneId };
+}
+
 function location() {
-  const space = spaces().find(s => s.active), f = focused();
+  const { activeSpace: space, sameSpaceFocus, tabId } = getActiveTabContext();
   const allPanes = panes();
-  const pane = f?.pane ? allPanes.find(p => p.pane === f.pane) : null;
+  const pane = sameSpaceFocus?.pane
+    ? allPanes.find(p => p.pane === sameSpaceFocus.pane)
+    : (tabId ? allPanes.find(p => p.tab === tabId && p.focused) ?? allPanes.find(p => p.tab === tabId) : null);
   const viewerRoot = pane?.mod === "file-viewer" ? shared("file-viewer.meta")?.[pane.pane]?.root : null;
-  const fallbackTermPane = pane && !pane.cwd && f?.tab
-    ? allPanes.find(p => p.tab === f.tab && p.cwd)
+  const changesRoot = pane?.mod === "changes-history" ? shared("changes.pane.meta")?.[pane.pane]?.root : null;
+  const modRoot = viewerRoot || changesRoot;
+  const fallbackTermPane = pane && !pane.cwd && tabId
+    ? allPanes.find(p => p.tab === tabId && p.cwd)
     : null;
   const spaceTabIds = new Set((space?.tabs ?? []).map(t => t.id));
-  const spaceTermPane = !pane?.cwd && !viewerRoot && !fallbackTermPane?.cwd
+  const spaceTermPane = !pane?.cwd && !modRoot && !fallbackTermPane?.cwd
     ? allPanes.find(p => spaceTabIds.has(p.tab) && p.cwd)
     : null;
-  const sameSpaceFocusedCwd = f?.space === space?.id ? f?.cwd : null;
-  const on = f?.pane === null ? (f.terminal?.includes("/") ? f.terminal.split("/")[0] : null) : space?.machine ?? null;
-  return { cwd: pane?.cwd || viewerRoot || fallbackTermPane?.cwd || spaceTermPane?.cwd || space?.folder || sameSpaceFocusedCwd, on, space: space?.id };
+  const sameSpaceFocusedCwd = sameSpaceFocus?.cwd ?? null;
+  const on = sameSpaceFocus && sameSpaceFocus.pane === null
+    ? (sameSpaceFocus.terminal?.includes("/") ? sameSpaceFocus.terminal.split("/")[0] : null)
+    : space?.machine ?? null;
+  return { cwd: pane?.cwd || modRoot || fallbackTermPane?.cwd || spaceTermPane?.cwd || space?.folder || sameSpaceFocusedCwd, on, space: space?.id };
 }
 const key = () => JSON.stringify(location());
 const PER_FOLDER = 250, TOTAL = 1500;
@@ -759,10 +774,24 @@ export default class FilesSearch extends View {
           .child(
             menuItem("ctx-open-tab", "Open in New Tab", () => {
               if (overlay) closeOverlay(overlay);
+              const editorMode = Boolean(shared("editor.mode")?.enabled);
+              const activeSpace = spaces().find(s => s.active);
+              const spaceTabIds = new Set((activeSpace?.tabs ?? []).map(t => t.id));
+              const meta = shared("file-viewer.meta") ?? {};
+              const existingTabPane = panes().find(p => {
+                if (p.mod !== "file-viewer" || !spaceTabIds.has(p.tab)) return false;
+                const pm = meta[p.pane];
+                return pm?.file === m.relPath && pm.root === m.root && (pm.on ?? null) === (m.on ?? null);
+              });
+              if (existingTabPane) {
+                run("tab.select", { id: existingTabPane.tab });
+                run("pane.focus", { pane: existingTabPane.pane });
+                return;
+              }
               const res = run("tab.new", {
                 name: m.name,
                 mod: "file-viewer",
-                props: { file: m.relPath, root: m.root, on: m.on, tab: null, solo: true },
+                props: { file: m.relPath, root: m.root, on: m.on, tab: null, solo: true, editFirst: editorMode },
               });
               if (res?.pane) run("pane.rename", { pane: res.pane, name: m.name });
             }),
@@ -796,11 +825,11 @@ export default class FilesSearch extends View {
 
   getActiveViewerFile() {
     if (!this.root) return null;
-    const f = focused();
+    const { tabId, focusedPaneId } = getActiveTabContext();
     const allPanes = panes();
     const meta = shared("file-viewer.meta") ?? {};
-    const focusedPane = f?.pane ? allPanes.find(p => p.pane === f.pane && p.mod === "file-viewer") : null;
-    const candidate = focusedPane ?? (f?.tab ? allPanes.find(p => p.tab === f.tab && p.mod === "file-viewer") : null);
+    const focusedPane = focusedPaneId ? allPanes.find(p => p.pane === focusedPaneId && p.mod === "file-viewer") : null;
+    const candidate = focusedPane ?? (tabId ? allPanes.find(p => p.tab === tabId && p.mod === "file-viewer") : null);
     if (!candidate) return null;
     const m = meta[candidate.pane];
     if (!m?.file || m.root !== this.root || (m.on ?? null) !== (this.on ?? null)) return null;
@@ -809,8 +838,7 @@ export default class FilesSearch extends View {
 
   show(path, cx, locationTarget = null, event = null) {
     if (!path || !this.root) return;
-    const f = focused();
-    const tabId = f?.tab ?? null;
+    const { activeSpace, tabId, focusedPaneId } = getActiveTabContext();
     const editorMode = Boolean(shared("editor.mode")?.enabled);
     const forceNewPane = Boolean(event?.modifiers?.shift);
     const openInNewTab = Boolean(event?.modifiers?.control || event?.modifiers?.platform);
@@ -831,7 +859,6 @@ export default class FilesSearch extends View {
     const meta = shared("file-viewer.meta") ?? {};
 
     const openTabDeduplicated = () => {
-      const activeSpace = spaces().find(s => s.active);
       const spaceTabIds = new Set((activeSpace?.tabs ?? []).map(t => t.id));
       const existingTabPane = allPanes.find(p => {
         if (p.mod !== "file-viewer" || !spaceTabIds.has(p.tab)) return false;
@@ -867,7 +894,7 @@ export default class FilesSearch extends View {
 
     const tabPanes = tabId ? allPanes.filter(p => p.tab === tabId) : [];
     const existing = !forceNewPane
-      ? (tabPanes.find(p => p.pane === f?.pane && p.mod === "file-viewer") ?? tabPanes.find(p => p.mod === "file-viewer"))
+      ? (tabPanes.find(p => p.pane === focusedPaneId && p.mod === "file-viewer") ?? tabPanes.find(p => p.mod === "file-viewer"))
       : null;
 
     if (existing) {

@@ -225,17 +225,20 @@ export default class SystemMonitor extends View {
           }
         }
 
-        const meta = shared("file-viewer.meta");
-        if (meta && typeof meta === "object") {
-          const liveIds = new Set(panes().filter(p => p.mod === "file-viewer").map(p => p.pane));
+        const pruneModMeta = (sharedKey, modName) => {
+          const meta = shared(sharedKey);
+          if (!meta || typeof meta !== "object") return;
+          const liveIds = new Set(panes().filter(p => p.mod === modName).map(p => p.pane));
           const pruned = {};
           let changed = false;
           for (const [k, v] of Object.entries(meta)) {
             if (liveIds.has(k)) pruned[k] = v;
             else changed = true;
           }
-          if (changed) setShared("file-viewer.meta", pruned);
-        }
+          if (changed) setShared(sharedKey, pruned);
+        };
+        pruneModMeta("file-viewer.meta", "file-viewer");
+        pruneModMeta("changes.pane.meta", "changes-history");
 
         if (reason === "manual" || reason === "high-ram" || removedTerminals > 0) {
           const prevSeq = shared("herdr.gc")?.seq ?? 0;

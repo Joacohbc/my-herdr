@@ -41,6 +41,15 @@ function snapshotPane(p) {
       return { kind: "file-viewer", file: meta.file, root: meta.root, on: meta.on ?? null, line: meta.line ?? null, name: p.name };
     }
   }
+  if (p.mod === "changes-history") {
+    const meta = shared("changes.pane.meta")?.[p.pane];
+    if (meta?.kind === "file" && meta.fileDiff && meta.root) {
+      return { kind: "changes-diff", fileDiff: meta.fileDiff, root: meta.root, on: meta.on ?? null, name: p.name };
+    }
+    if (meta?.root) {
+      return { kind: "terminal", cwd: meta.root, name: p.name || null };
+    }
+  }
   return { kind: "terminal", cwd: p.cwd || null, name: p.name || null };
 }
 
@@ -53,17 +62,28 @@ function pushBoundedHistory(key, entry) {
   setShared(key, [...prev, entry].slice(-MAX_CLOSED_HISTORY));
 }
 
-function pruneOrphanViewerMeta() {
-  const meta = shared("file-viewer.meta");
+function pruneOrphanModMeta(sharedKey, modName) {
+  const meta = shared(sharedKey);
   if (!meta || typeof meta !== "object") return;
-  const activeIds = new Set(panes().filter(p => p.mod === "file-viewer").map(p => p.pane));
+  const activeIds = new Set(panes().filter(p => p.mod === modName).map(p => p.pane));
   let changed = false;
   const next = {};
   for (const [id, val] of Object.entries(meta)) {
     if (activeIds.has(id)) next[id] = val;
     else changed = true;
   }
-  if (changed) setShared("file-viewer.meta", next);
+  if (changed) setShared(sharedKey, next);
+}
+
+function pruneOrphanViewerMeta() {
+  pruneOrphanModMeta("file-viewer.meta", "file-viewer");
+  pruneOrphanModMeta("changes.pane.meta", "changes-history");
+}
+
+function activeSpaceTabId() {
+  const space = spaces().find(s => s.active);
+  const f = focused();
+  return (f?.space === space?.id ? f.tab : null) ?? space?.tabs?.find(t => t.active)?.id ?? null;
 }
 
 function closeFocusedPane() {
@@ -84,7 +104,16 @@ function reopenClosedPane() {
     const res = run("pane.split", {
       direction: "right",
       mod: "file-viewer",
-      props: { file: entry.file, root: entry.root, on: entry.on, tab: focused()?.tab ?? null, line: entry.line },
+      props: { file: entry.file, root: entry.root, on: entry.on, tab: activeSpaceTabId(), line: entry.line },
+    });
+    if (res?.pane && entry.name) run("pane.rename", { pane: res.pane, name: entry.name });
+    return;
+  }
+  if (entry.kind === "changes-diff") {
+    const res = run("pane.split", {
+      direction: "right",
+      mod: "changes-history",
+      props: { fileDiff: entry.fileDiff, root: entry.root, on: entry.on, tab: activeSpaceTabId() },
     });
     if (res?.pane && entry.name) run("pane.rename", { pane: res.pane, name: entry.name });
     return;
@@ -117,6 +146,14 @@ function reopenClosedTab() {
       name: entry.name || first.name || first.file,
       mod: "file-viewer",
       props: { file: first.file, root: first.root, on: first.on, tab: null, line: first.line, solo: true },
+    });
+    return;
+  }
+  if (first?.kind === "changes-diff") {
+    run("tab.new", {
+      name: entry.name || first.name || first.fileDiff?.path || "Diff",
+      mod: "changes-history",
+      props: { fileDiff: first.fileDiff, root: first.root, on: first.on },
     });
     return;
   }

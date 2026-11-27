@@ -205,6 +205,10 @@ export default class FileViewer extends View {
     this.textLen = 0;
     this.csvTable = null;
     this.csvOriginalText = null;
+    this.csvFilter = "";
+    this.csvSortCol = -1;
+    this.csvSortDir = 0;
+    this.csvAcIndex = 0;
     this.csvViewRows = [];
     this.csvPage = 0;
     this.csvColFilters = new Map();
@@ -213,19 +217,24 @@ export default class FileViewer extends View {
     this.csvMenuQuery = "";
     this.csvSelected = null;
     this.csvEditedCells = new Set();
-    this.csvUniqueCache?.clear();
     this.csvDirty = false;
     this.csvSaveError = null;
-    if (this.imageRelPath) {
-      const old = this.imageRelPath;
-      this.imageRelPath = null;
-      removePreviewFile(old);
-    }
+    this.csvFilterInput?.set_value("");
+    this.csvMenuInput?.set_value("");
+    this.csvCellInput?.set_value("");
+    this.invalidateStagedImage();
     if (this.pdfRelPath) {
       const old = this.pdfRelPath;
       this.pdfRelPath = null;
       removePreviewFile(old);
     }
+  }
+
+  invalidateStagedImage() {
+    if (!this.imageRelPath) return;
+    const old = this.imageRelPath;
+    this.imageRelPath = null;
+    removePreviewFile(old);
   }
 
   resolvePaneId() {
@@ -380,9 +389,12 @@ export default class FileViewer extends View {
     this.codeDirty = false;
     this.codeSaveError = null;
     if (this.code) this.code.set_value(this.originalContent);
+    if (this.kind === "svg") this.invalidateStagedImage();
     if (this.kind === "markdown" || this.kind === "csv" || this.kind === "svg") {
       this.rawText = this.originalContent;
       if (this.kind === "csv") {
+        this.csvDirty = false;
+        this.csvEditedCells = new Set();
         this.csvTable = parseCsvTable(this.originalContent, this.file.toLowerCase().endsWith(".tsv"));
         this.csvUniqueCache.clear();
         this.rebuildCsvViewRows();
@@ -408,6 +420,7 @@ export default class FileViewer extends View {
         this.originalContent = content;
         this.codeDirty = false;
         this.codeSaveError = null;
+        if (this.kind === "svg") this.invalidateStagedImage();
         if (this.kind === "markdown" || this.kind === "csv" || this.kind === "svg") {
           this.rawText = content;
         }
@@ -436,22 +449,30 @@ export default class FileViewer extends View {
       if (this.code) {
         const currentVal = this.code.value();
         this.rawText = currentVal;
-        if (this.kind === "csv" && (this.codeDirty || !this.csvTable)) {
-          this.csvTable = parseCsvTable(currentVal, this.file.toLowerCase().endsWith(".tsv"));
-          this.csvUniqueCache.clear();
-          this.rebuildCsvViewRows();
+        if (this.kind === "csv") {
+          if (this.codeDirty || !this.csvTable) {
+            this.csvTable = parseCsvTable(currentVal, this.file.toLowerCase().endsWith(".tsv"));
+            this.csvUniqueCache.clear();
+            this.rebuildCsvViewRows();
+          }
+          if (this.codeDirty) {
+            this.csvDirty = !this.fileTruncated && this.csvOriginalText !== null && currentVal !== this.csvOriginalText;
+            this.codeDirty = false;
+          }
         }
         this.code.release();
         this.code = null;
       }
-      if (this.kind === "svg" && !this.imageRelPath && this.file && this.root) {
+      if (this.kind === "svg" && this.file && this.root) {
+        this.invalidateStagedImage();
         const seq = ++this.loadSeq;
         const fullPath = `${this.root}/${this.file}`;
         const on = this.on;
+        const svgOverride = this.rawText;
         this.loading = true;
         cx.spawn(async cx => {
           try {
-            const staged = await stageImagePreview(fullPath, on, `${this.token}-${seq}`);
+            const staged = await stageImagePreview(fullPath, on, `${this.token}-${seq}`, svgOverride);
             if (this.loadSeq !== seq || !this.previewMode) {
               removePreviewFile(staged.relPath);
               return;
@@ -469,6 +490,7 @@ export default class FileViewer extends View {
           }
         });
       }
+      this.publishMeta();
       return;
     }
     const seq = ++this.loadSeq;
@@ -492,6 +514,9 @@ export default class FileViewer extends View {
         }
         if (this.loadSeq !== seq || this.previewMode || content === null) return;
         const ed = this.attachEditor(file, content);
+        this.codeDirty = !this.fileTruncated && this.originalContent !== null && content !== this.originalContent;
+        if (this.kind === "csv") this.csvDirty = false;
+        this.publishMeta();
         if (this.highlightRange) ed.set_selected_range(this.highlightRange);
       } catch (e) {
         if (this.loadSeq === seq) this.error = String(e?.message || e);
@@ -1197,11 +1222,13 @@ export default class FileViewer extends View {
     const content = this.csvOriginalText.length > MAX_FILE_CHARS
       ? this.csvOriginalText.slice(0, MAX_FILE_CHARS) + "\n… (file truncated at 250 KB to save RAM)"
       : this.csvOriginalText;
+    this.originalContent = this.fileTruncated ? null : this.csvOriginalText;
     this.rawText = content;
     this.csvTable = parseCsvTable(content, this.file.toLowerCase().endsWith(".tsv"));
     this.csvEditedCells = new Set();
     this.csvUniqueCache?.clear();
     this.csvDirty = false;
+    this.codeDirty = false;
     this.csvSaveError = null;
     if (this.csvSelected) {
       const { row, col } = this.csvSelected;
@@ -1231,9 +1258,11 @@ export default class FileViewer extends View {
       try {
         await saveTextFile(fullPath, on, serialized, expected);
         this.csvOriginalText = serialized;
+        this.originalContent = serialized;
         this.rawText = serialized;
         this.csvEditedCells = new Set();
         this.csvDirty = false;
+        this.codeDirty = false;
         this.csvSaveError = null;
       } catch (e) {
         this.csvSaveError = String(e?.message || e || "Save failed");
