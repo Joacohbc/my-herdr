@@ -9,8 +9,9 @@ mkdir -p "$HERDR_HOME/layouts" "$HERDR_HOME/mods"
 ln -sfn "$REPO_DIR/layouts/my-herdr.json" "$HERDR_HOME/layouts/my-herdr.json"
 ln -sfn "$REPO_DIR/command-aliases.json" "$HERDR_HOME/command-aliases.json"
 ln -sfn "$REPO_DIR/ai-usage.json" "$HERDR_HOME/ai-usage.json"
+ln -sfn "$REPO_DIR/gemini-chat.json" "$HERDR_HOME/gemini-chat.json"
 
-MODS=(files-search file-viewer pane-custom system-monitor ports-monitor agents-custom changes-history tabs-custom web-launcher command-palette docker-monitor ai-usage)
+MODS=(files-search file-viewer pane-custom system-monitor ports-monitor agents-custom changes-history tabs-custom web-launcher command-palette docker-monitor ai-usage gemini-chat)
 
 for mod in "${MODS[@]}"; do
   target="$HERDR_HOME/mods/$mod"

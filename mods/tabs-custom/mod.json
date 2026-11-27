@@ -11,6 +11,12 @@
       "command": "tabs-custom.toggle_editor_mode",
       "group": "Editor",
       "words": "editor mode vscode files sticky tabs ctrl-shift-e"
+    },
+    {
+      "title": "Toggle Gemini Panel",
+      "command": "tabs-custom.toggle_gemini_panel",
+      "group": "Gemini",
+      "words": "gemini web ai chat chrome cookie ctrl-shift-g"
     }
   ]
 }

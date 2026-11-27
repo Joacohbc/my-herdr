@@ -28,6 +28,7 @@ const tabBindings = {
   "ctrl-shift-t": "pane-custom.reopen_tab",
   "ctrl-shift-p": "mod.open:command-palette",
   "ctrl-shift-e": "tabs-custom.toggle_editor_mode",
+  "ctrl-shift-g": "tabs-custom.toggle_gemini_panel",
 };
 
 Object.assign(keys.global, {

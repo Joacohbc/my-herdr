@@ -6,10 +6,10 @@ Protocolo obligatorio para verificar cualquier cambio antes de darlo por termina
 
 ## 1. Validación Estática y de Render Inicial (`herdr-app check`)
 
-Ejecutar `herdr-app check` sobre cada mod modificado (o sobre los 6 mods tras cambios transversales):
+Ejecutar `herdr-app check` sobre cada mod modificado (o sobre los 13 mods tras cambios transversales):
 
 ```bash
-for mod in files-search file-viewer pane-custom system-monitor changes-history tabs-custom; do
+for mod in files-search file-viewer pane-custom system-monitor ports-monitor agents-custom changes-history tabs-custom web-launcher command-palette docker-monitor ai-usage gemini-chat; do
   herdr-app check ~/.config/herdr-app/mods/$mod || exit 1
 done
 ```
@@ -22,7 +22,7 @@ done
 
 Debido a que `~/.config/herdr-app/mods/*` son symlinks hacia `/home/joaco/projects/my-herdr/mods/*`, `inotify` en Linux no siempre detecta ediciones en el destino del symlink:
 
-- **Para mods montados en el layout** (`files-search`, `changes-history`, `pane-custom`, `tabs-custom`, `system-monitor`):
+- **Para mods montados en el layout** (`files-search`, `changes-history`, `gemini-chat`, `pane-custom`, `tabs-custom`, `system-monitor`, `ports-monitor`, `agents-custom`, `docker-monitor`, `ai-usage`):
   ```bash
   herdr-app do layout.switch '{"name":"main"}' && herdr-app do layout.switch '{"name":"my-herdr"}'
   ```

@@ -2,7 +2,7 @@
 
 ## 1. Visión General
 
-`my-herdr` es un repositorio Git (`/home/joaco/projects/my-herdr`) que concentra toda la personalización de **Herdr App** (`herdr-app`, interfaz nativa en Rust/GPUI) sobre la máquina local y hosts SSH conectados a `herdr-core` (`rbpil`, `rbpi8gbl`). El script `install.sh` enlaza mediante symlinks el layout, `command-aliases.json` y los 12 mods personalizados dentro de `~/.config/herdr-app/` y sincroniza `~/.config/herdr-app/keys.json`.
+`my-herdr` es un repositorio Git (`/home/joaco/projects/my-herdr`) que concentra toda la personalización de **Herdr App** (`herdr-app`, interfaz nativa en Rust/GPUI) sobre la máquina local y hosts SSH conectados a `herdr-core` (`rbpil`, `rbpi8gbl`). El script `install.sh` enlaza mediante symlinks el layout, `command-aliases.json`, `ai-usage.json`, `gemini-chat.json` y los 13 mods personalizados dentro de `~/.config/herdr-app/` y sincroniza `~/.config/herdr-app/keys.json`.
 
 ```text
 root (row)
@@ -22,9 +22,11 @@ root (row)
     │   ├── editor-files → mod: files-search (slot: editor-files, hidden por defecto) [CUSTOM]
     │   ├── main         → tab: active, pane header → pane-custom [CUSTOM]
     │   │                  (contiene terminales, file-viewer o changes-history standalone)
-    │   └── panel (stack, hidden por defecto)
-    │       ├── files    → mod: files-search            [CUSTOM]
-    │       └── changes  → mod: changes-history         [CUSTOM]
+    │   └── panel (column, hidden por defecto)
+    │       └── panel-body (stack)
+    │           ├── files    → mod: files-search        [CUSTOM]
+    │           ├── changes  → mod: changes-history     [CUSTOM]
+    │           └── gemini   → mod: gemini-chat         [CUSTOM]
     └── status           → mod: workspace-status        [NATIVO]
 ```
 
@@ -37,7 +39,7 @@ Los mods de Herdr corren en contextos aislados dentro de `gpui-shell` y se comun
 | Clave `shared` | Productor | Consumidor(es) | Contrato / Propósito |
 | --- | --- | --- | --- |
 | `file-viewer.open` | `files-search`, `changes-history` | `file-viewer` (no `solo`) | `{ file, root, on, tab, pane, line, col, matchLen, seq }`. Actualiza un visor existente en la pestaña actual sin abrir paneles duplicados. |
-| `file-viewer.meta` | `file-viewer` | `pane-custom`, `system-monitor` | Mapa `{ [paneId]: { file, root, on, line, md, hasPreview, preview, wrap, zoomPct, dirty } }`. Permite que el encabezado unificado muestre controles y `*` sin duplicar barras. |
+| `file-viewer.meta` | `file-viewer` | `pane-custom`, `system-monitor`, `tabs-custom`, `files-search`, `changes-history`, `command-palette`, `gemini-chat` | Mapa `{ [paneId]: { file, root, on, line, md, hasPreview, preview, wrap, zoomPct, dirty } }`. Permite que el encabezado unificado muestre controles y `*` sin duplicar barras y que otros mods detecten el archivo activo. |
 | `file-viewer.cmd` | `pane-custom` | `file-viewer` | `{ pane, action: "toggle_preview" \| "toggle_wrap" \| "zoom_in" \| "zoom_out" \| "zoom_reset", seq }`. |
 | `web-launcher.profile` | `web-launcher` | `web-launcher` | ID del último perfil de Chrome seleccionado (`"clean"`, `"Default"`, `"Profile 2"`, etc.). |
 | `ports.http` | `ports-monitor` | `web-launcher` | Lista acotada (máx. `32`) de puertos HTTP/HTTPS activos `[{ url, port, proto, exposure, service, process }]` publicada solo cuando cambia. |
@@ -45,7 +47,8 @@ Los mods de Herdr corren en contextos aislados dentro de `gpui-shell` y se comun
 | `changes.diff.open` | `changes-history` (panel) | `changes-history` (standalone) | `{ pane, tab, fileDiff, root, on, seq }`. Reutiliza un panel de diff de archivo abierto en la pestaña actual al hacer clic en otro archivo desde `Changes` / `Staged Changes`. |
 | `changes.pane.meta` | `changes-history` (standalone) | `changes-history`, `files-search`, `command-palette`, `pane-custom`, `system-monitor` | Mapa `{ [paneId]: { kind: "file" \| "commit" \| "pr", root, on, fileDiff } }`. Distingue pestañas de diff de archivo frente a commits/PRs, ancla `location()` al repositorio activo y permite reabrir diffs cerrados con `Ctrl + Shift + T`. |
 | `changes.refresh` | `changes-history` (standalone) | `changes-history` (panel) | `{ seq, root }`. Sincronización unidireccional emitida por pestañas de diff standalone tras aplicar acciones por bloque (stage/unstage/revert) para refrescar el panel lateral y el contador del badge. |
-| `herdr.gc` | `system-monitor` | `files-search`, `file-viewer`, `changes-history`, `ports-monitor` | `{ seq, at, reason }`. Señal de limpieza global que dispara evicción inmediata de cachés e hibernación de pestañas inactivas. |
+| `herdr.gc` | `system-monitor` | `files-search`, `file-viewer`, `changes-history`, `ports-monitor`, `gemini-chat` | `{ seq, at, reason }`. Señal de limpieza global que dispara evicción inmediata de cachés e hibernación de pestañas inactivas. |
+| `gemini.status` | `gemini-chat` | `tabs-custom` | `{ streaming, unread }`. Indica en el botón `Gemini` de la barra superior si hay una respuesta en curso (spinner) o sin leer mientras el panel está oculto. |
 | `tiling.closedPanes` / `tiling.closedTabs` | `pane-custom` | `pane-custom` | Pilas acotadas a 8 elementos deduplicados para `pane-custom.reopen_pane` y `pane-custom.reopen_tab` (`Ctrl + Shift + T`). |
 | `files-search.refresh` | `command-palette` | `files-search` | `{ seq, expand, root, on }`. Notifica al árbol de `Files` tras crear un archivo/carpeta para refrescar y expandir automáticamente la ruta padre. |
 | `command-palette.recent` | `command-palette` | `command-palette` | Historial acotado (máx. `10`) de comandos ejecutados recientemente mediante el prefijo `>`. |
@@ -58,9 +61,9 @@ Los mods de Herdr corren en contextos aislados dentro de `gpui-shell` y se comun
 
 Cada mod gestiona su memoria en tres capas complementarias:
 
-1. **Pausa por visibilidad:** `files-search` y `changes-history` inspeccionan el árbol de `layout()` (`panel.hidden` y `panel-body.active`) y `window()?.visible`. Al ocultarse, cancelan `watchFolder` al instante y detienen el polling rápido.
+1. **Pausa por visibilidad:** `files-search`, `changes-history` y `gemini-chat` inspeccionan el árbol de `layout()` (`panel.hidden` y `panel-body.active`) y `window()?.visible`. Al ocultarse, `files-search` y `changes-history` cancelan `watchFolder` al instante y detienen el polling rápido; `gemini-chat` marca el inicio de inactividad para evicción diferida.
 2. **Evicción e hibernación por inactividad:**
-   - Paneles laterales ocultos (`files-search`, `changes-history`): vacían cachés (`entries`, `marks`, `commits`, `rows`, `scans`, `releaseIconCache()`) tras `30 s`.
+   - Paneles laterales ocultos (`files-search`, `changes-history`, `gemini-chat`): vacían cachés (`entries`, `marks`, `commits`, `rows`, `scans`, `releaseIconCache()`, mensajes en RAM y apagado del worker Node de `gemini-chat`) tras `30 s` (nunca mientras `gemini-chat` tenga un stream activo o borrador escrito).
    - Bloques del sidebar (`docker-monitor`, `ai-usage`): muestrean más lento al colapsarse (`15 s` / `5 min`), no muestrean con el sidebar oculto y vacían contenedores, historial de CPU y resumen de uso tras `30 s` oculto.
    - Pestañas en segundo plano (`file-viewer`, `changes-history` standalone): hibernan tras `45 s` liberando `EditorState`, texto, tabla CSV y archivos temporales en `data/fv-preview/`, excepto cuando `isDirty()` es verdadero.
 3. **Recolección coordinada (`system-monitor`):**
@@ -70,7 +73,7 @@ Cada mod gestiona su memoria en tres capas complementarias:
 
 ---
 
-## 4. Decisiones de Arquitectura (`D1`–`D23`)
+## 4. Decisiones de Arquitectura (`D1`–`D24`)
 
 | ID | Decisión | Alternativa descartada y motivo |
 | --- | --- | --- |
@@ -97,3 +100,4 @@ Cada mod gestiona su memoria en tres capas complementarias:
 | **D21** | Integrar el conmutador estilo *Alt-Tab* de Spaces y Tabs dentro de `mods/command-palette/` (`Ctrl + Shift + P`, en modo unificado y en modo dedicado `@`) respaldado por un historial MRU acotado (`shared("switcher.mru")`, máx. `24`) registrado de forma diferida desde `tabs-custom`. | Mantener un segundo overlay independiente duplicaría la UI de búsqueda y los atajos; `command-palette` es efímero (`"place": "none"`), por lo que no puede rastrear cambios de foco en reposo, mientras que `tabs-custom` permanece siempre montado y actualiza el MRU con `cx.spawn` + `cx.sleep(0)` sin timers ni mutaciones síncronas en `render()`. |
 | **D22** | Implementar el **Modo Editor estilo VS Code** mediante un bloque `editor-files` (`files-search` con `props: { slot: "editor-files" }`, `hidden: true`) al inicio de `work-body` controlado por `shared("editor.mode")`, `layout.show`/`hide` y colapso del `sidebar` a rail (`44 px`), en lugar de alternar a un segundo layout JSON. | Usar `layout.switch` recarga todos los mods del layout y descarta estado transitorio (scroll, búsquedas, cachés). Con `editor-files` dentro de `my-herdr.json`, el cambio es instantáneo y solo una instancia de `files-search` permanece visible a la vez (la oculta cancela `watchFolder` y libera sus cachés). |
 | **D23** | En `changes-history` (`hunks.js` y `main.js`), aplicar stage/unstage/revert por bloque pasando el parche como argumento posicional `"$1"` a `sh -c 'printf "%s" "$1" \| git apply --whitespace=nowarn <flags> -'` (con `APPLY_FLAGS` constantes y tope `MAX_PATCH_BYTES = 100_000` bytes UTF-8 medidos con `utf8ByteLength()`), desacoplar los botones de acción del diff en una barra superior sincronizada con `on_item_click` / `on_item_secondary_click`, usar `VirtualListScrollHandle` para el salto programático y añadir un **Diff Overview Ruler** de `16 px` con hasta `MAX_RULER_BUCKETS = 120` cubetas fijas. | `exec()` en Herdr no expone `stdin`, y escribir archivos temporales complicaría la limpieza en sesiones SSH; acotar en bytes UTF-8 a `100_000` mantiene el argumento holgadamente por debajo del límite `MAX_ARG_STRLEN` de 128 KB en Linux incluso con caracteres multibyte. Además, el runtime GPUI prohíbe registrar `on_click` dentro del renderer de `v_virtual_list`, mientras que `VirtualListScrollHandle` + `120` cubetas fijas permiten saltar al instante desde `↑`/`↓` o desde la regla con coste de renderizado constante independientemente del tamaño del diff. |
+| **D24** | Implementar `mods/gemini-chat/` como cliente nativo GPUI exclusivo de **Gemini Web** montado en el stack derecho `panel-body` (`gemini`, `Ctrl + Shift + G`), usando un *worker* efímero en Node.js 24 puro (`worker.mjs`, servidor WebSocket RFC 6455 en `127.0.0.1:0` autenticado por token de un solo uso con auto-apagado tras `90 s` inactivo) e importación explícita de cookies del perfil de Chrome elegido (`chrome-cookies.mjs` con `node:sqlite` + D-Bus `org.freedesktop.secrets` vía `python3`, con respaldo en `secret-tool`/`kwallet-query`, guardadas con permisos `0600` en `~/.config/herdr-app/gemini-chat.secret.json`). Las preferencias de UI se guardan en `data/gemini-chat/prefs.json` sin mutar el symlink `gemini-chat.json`. | GPUI carece de WebView (**D14**) y `fetch()` en `gpui-shell` no expone streaming incremental (`ReadableStream`), mientras que un puente CDP mantendría un proceso Chromium completo (~300–600 MB) en RAM. El *worker* Node efímero + WebSocket local aporta streaming real, rotación automática de `__Secure-1PSIDTS`, cero dependencias npm y cero RAM en reposo al ocultarse el panel o recibirse `herdr.gc`. |

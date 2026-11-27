@@ -201,6 +201,13 @@
                       "content": {
                         "mod": "changes-history"
                       }
+                    },
+                    {
+                      "id": "gemini",
+                      "type": "block",
+                      "content": {
+                        "mod": "gemini-chat"
+                      }
                     }
                   ],
                   "active": "files"

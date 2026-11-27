@@ -15,7 +15,8 @@ Use this map before editing or reviewing any area of `my-herdr`. Read only the r
 | `mods/file-viewer/*` | `mods-catalog.md §1.2`, `architecture.md §2–§3`, `code-conventions.md` | `D4, D5, D6, D7, D8, D9, D11, D12` | `add-or-edit-mod`, `ram-and-gc-audit` |
 | `mods/changes-history/*` | `mods-catalog.md §1.3`, `architecture.md §2–§3`, `code-conventions.md` | `D3, D10, D11, D12, D13, D23` | `add-or-edit-mod`, `ram-and-gc-audit` |
 | `mods/pane-custom/*` | `mods-catalog.md §1.4`, `architecture.md §2`, `code-conventions.md` | `D2, D4, D9, D11` | `add-or-edit-mod`, `sync-keys-and-icons` |
-| `mods/tabs-custom/*` | `mods-catalog.md §1.5`, `architecture.md §2`, `code-conventions.md` | `D1, D11` | `add-or-edit-mod` |
+| `mods/tabs-custom/*` | `mods-catalog.md §1.5`, `architecture.md §2`, `code-conventions.md` | `D1, D11, D21, D22, D24` | `add-or-edit-mod`, `sync-keys-and-icons` |
+| `mods/gemini-chat/*`, `gemini-chat.json` | `mods-catalog.md §1.13`, `architecture.md §2–§3, §4 (D24)`, `code-conventions.md` | `D11, D14, D24` | `add-or-edit-mod`, `ram-and-gc-audit` |
 | `mods/system-monitor/*` | `mods-catalog.md §1.6`, `architecture.md §3`, `code-conventions.md` | `D11, D12` | `add-or-edit-mod`, `ram-and-gc-audit` |
 | `layouts/my-herdr.json`, `install.sh` | `architecture.md §1`, `mods-catalog.md §2`, `testing.md` | `D1` | `add-or-edit-mod` |
 | `scripts/apply-keys.js`, `keys.json` | `mods-catalog.md §2`, `architecture.md §4 (D2)` | `D2` | `sync-keys-and-icons` |

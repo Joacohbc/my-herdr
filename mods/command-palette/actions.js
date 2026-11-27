@@ -379,6 +379,15 @@ export function switchToTarget(item) {
 
 const CUSTOM_COMMANDS = [
   {
+    id: "custom:toggle-gemini-panel",
+    group: "Gemini",
+    title: "Toggle Gemini Panel",
+    subtitle: "Open or hide the native Gemini Web chat panel (Chrome profile cookies)",
+    words: "gemini web ai chat chrome cookies assistant ctrl-shift-g",
+    shortcutKey: "tabs-custom.toggle_gemini_panel",
+    action: { kind: "run", command: "tabs-custom.toggle_gemini_panel" },
+  },
+  {
     id: "custom:toggle-editor-mode",
     group: "Editor",
     title: "Toggle Editor Mode (VS Code layout)",

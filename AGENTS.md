@@ -1,6 +1,6 @@
 # AGENTS.md — `my-herdr`
 
-Personal customization repository for **Herdr App** (`herdr-app`, native Rust/GPUI terminal & AI agent workspace) and `herdr-core` (`hc`), symlinked into `~/.config/herdr-app/`. Includes a custom layout (`my-herdr`), 12 GPUI JavaScript mods (`files-search`, `file-viewer`, `changes-history`, `pane-custom`, `tabs-custom`, `system-monitor`, `ports-monitor`, `agents-custom`, `web-launcher`, `command-palette`, `docker-monitor`, `ai-usage`), configurable terminal command aliases (`command-aliases.json`), Material Icon compaction, keyboard bindings, and automatic RAM/GC management.
+Personal customization repository for **Herdr App** (`herdr-app`, native Rust/GPUI terminal & AI agent workspace) and `herdr-core` (`hc`), symlinked into `~/.config/herdr-app/`. Includes a custom layout (`my-herdr`), 13 GPUI JavaScript mods (`files-search`, `file-viewer`, `changes-history`, `pane-custom`, `tabs-custom`, `system-monitor`, `ports-monitor`, `agents-custom`, `web-launcher`, `command-palette`, `docker-monitor`, `ai-usage`, `gemini-chat`), configurable terminal command aliases (`command-aliases.json`), Material Icon compaction, keyboard bindings, and automatic RAM/GC management.
 
 This file holds the rules an agent must follow. Detailed documentation lives in `.docs/` (Spanish) and the domain vocabulary in `.docs/context.md`.
 
@@ -8,7 +8,7 @@ This file holds the rules an agent must follow. Detailed documentation lives in 
 
 | Need | Read |
 | --- | --- |
-| Layout tree, `shared` contracts, RAM/GC lifecycle, decisions D1–D23 | `.docs/architecture.md` |
+| Layout tree, `shared` contracts, RAM/GC lifecycle, decisions D1–D24 | `.docs/architecture.md` |
 | Every custom mod, interactions, limits, scripts | `.docs/mods-catalog.md` |
 | Domain vocabulary (ubiquitous language) | `.docs/context.md` |
 | GPUI runtime restrictions, `hbc-code-design`, language rules | `.docs/code-conventions.md` |
@@ -18,11 +18,11 @@ This file holds the rules an agent must follow. Detailed documentation lives in 
 ## Commands
 
 ```bash
-# Link layout + all 12 mods, sync keys.json, and validate all mods
+# Link layout + all 13 mods, sync keys.json, and validate all mods
 ./install.sh
 
 # Validate every custom mod
-for mod in files-search file-viewer pane-custom system-monitor ports-monitor agents-custom changes-history tabs-custom web-launcher command-palette docker-monitor ai-usage; do
+for mod in files-search file-viewer pane-custom system-monitor ports-monitor agents-custom changes-history tabs-custom web-launcher command-palette docker-monitor ai-usage gemini-chat; do
   herdr-app check ~/.config/herdr-app/mods/$mod || exit 1
 done
 
@@ -44,8 +44,8 @@ node scripts/build-icons.js
 ## Architecture in five lines
 
 - `layouts/my-herdr.json` and `mods/*` are symlinked into `~/.config/herdr-app/`; shipped Herdr files are never touched.
-- Mods run in isolated GPUI JS sandboxes and communicate solely via `shared()`/`setShared()` (`file-viewer.{open,meta,cmd}`, `changes.{badge,diff.open,refresh}`, `herdr.gc`) and `run()`.
-- Right-side panels (`files-search`, `changes-history`) cancel `watchFolder` on hide and evict caches/icon maps after 30 s; background viewer/diff tabs hibernate after 45 s unless dirty (`*`).
+- Mods run in isolated GPUI JS sandboxes and communicate solely via `shared()`/`setShared()` (`file-viewer.{open,meta,cmd}`, `changes.{badge,diff.open,refresh}`, `gemini.status`, `herdr.gc`) and `run()`.
+- Right-side panels (`files-search`, `changes-history`, `gemini-chat`) evict caches/icon maps (and shut down `gemini-chat`'s Node worker) after 30 s hidden or on `herdr.gc` (`files-search`/`changes-history` also cancel `watchFolder` immediately on hide); background viewer/diff tabs hibernate after 45 s unless dirty (`*`).
 - Sidebar blocks `docker-monitor` (containers + CPU/RAM) and `ai-usage` (Claude/Antigravity quota via `claude -p /usage` and `agy -p /usage`, top models via `collect.mjs`; Node/CLIs from `ai-usage.json` or `which`) join the push-resize `STACK`.
 - `system-monitor` attributes deep `pid`/`ppid` process trees, purges finished `herdr-core` terminals (`hc rm`) every 60 s, and broadcasts `herdr.gc` under high RAM (`>= 75%`) or on manual `GC`.
 - `file-viewer` supports Markdown, hi-res 1024 px SVG/image staging (`data/fv-preview/`), Excel-style editable CSV/TSV with `@Col:val` autocomplete, lazy single-page PDFs, and editable Raw/Code mode (`Ctrl+S`).

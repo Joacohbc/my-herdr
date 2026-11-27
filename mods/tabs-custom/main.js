@@ -49,8 +49,22 @@ export default class Tabs extends View {
       for (;;) {
         const cmd = await nextCommand();
         if (cmd === "toggle_editor_mode") this.toggleEditorMode();
+        else if (cmd === "toggle_gemini_panel") this.toggleGeminiPanel();
       }
     });
+  }
+
+  toggleGeminiPanel() {
+    const root = layout();
+    const panel = find(root, "panel");
+    const body = find(root, "panel-body");
+    const isOpen = panel && !panel.hidden && body?.active === "gemini";
+    if (isOpen) {
+      run("layout.hide", { id: "panel" });
+      return;
+    }
+    run("layout.select", { stack: "panel-body", child: "gemini" });
+    run("layout.show", { id: "panel" });
   }
 
   applyEditorLayout(enabled, prevSidebarPx = DEFAULT_SIDEBAR_PX) {
@@ -223,11 +237,13 @@ export default class Tabs extends View {
       : 10;
     const panel = find(root, "panel"), body = find(root, "panel-body");
     const enabled = shared("workspace.panels") ?? ["files", "changes"];
-    this.syncPanel(space, panel, body, enabled, editorMode);
+    const allowedPanels = enabled.includes("gemini") ? enabled : [...enabled, "gemini"];
+    this.syncPanel(space, panel, body, allowedPanels, editorMode);
     const changesBadge = shared("changes.badge");
     const changesCount = changesBadge && (!changesBadge.space || changesBadge.space === space?.id)
       ? Number(changesBadge.count || 0)
       : 0;
+    const geminiStatus = shared("gemini.status") ?? {};
 
     const panelButton = (id, label, icon, badgeCount = 0) => {
       const on = panel && !panel.hidden && body?.active === id;
@@ -280,6 +296,21 @@ export default class Tabs extends View {
       .child(svg("mods/tabs-custom/web.svg").size(14))
       .child("Web");
 
+    const geminiOn = panel && !panel.hidden && body?.active === "gemini";
+    const geminiButton = h_flex().id("panel-gemini").relative().h(26).px(8).gap(5).flex_none().items_center().rounded(6)
+      .text_size(12).bg(geminiOn ? t.selected : t.chrome).text_color(geminiOn ? t.foreground : t.muted)
+      .hover(s => s.bg(t.hover)).tooltip("Toggle Gemini Panel (Ctrl+Shift+G)").on_mouse_down("left", stop)
+      .on_click(() => this.toggleGeminiPanel())
+      .child(
+        geminiStatus.streaming
+          ? svg("mods/workspace-chrome/spinner.svg").size(13).text_color(t.accent).spin(900)
+          : svg("mods/gemini-chat/icon.svg").size(14).text_color(geminiOn ? t.accent : t.muted),
+      )
+      .child("Gemini")
+      .when(Boolean(geminiStatus.unread && !geminiOn), el =>
+        el.child(div().absolute().top(3).right(3).size(6).rounded(3).bg(t.accent)),
+      );
+
     const fontFamily = settings().font_family ?? settings().font;
     return h_flex().size_full().min_w(0).px(10).pl(lightsPadding).gap(3).items_center().bg(t.chrome).border_b(1).border_color(t.border)
       .when(Boolean(fontFamily), el => el.font_family(fontFamily))
@@ -291,6 +322,7 @@ export default class Tabs extends View {
       .child(button("tab-new", "+", () => openOverlay({ mod: "new-menu", kind: "popup", width: 250, height: 512 })))
       .child(editorButton)
       .child(webButton)
+      .child(geminiButton)
       .when(!editorMode && enabled.includes("files"), el => el.child(panelButton("files", "Files", "mods/files/file.svg")))
       .when(enabled.includes("changes"), el => el.child(panelButton("changes", "Changes", "mods/changes/changes.svg", changesCount)))
       .when(w?.buttons, el => el.child(button("minimize", w.platform === "windows" ? svg("mods/tabs-custom/win-min.svg").size(16) : "−", () => run("window.minimize")))
